@@ -164,6 +164,18 @@ class _FakeMemoryRetriever:
         return self.hits
 
 
+class _FakeRagRetriever:
+    def __init__(self, hits):
+        self.hits = hits
+        self.last_query = ""
+        self.last_top_k = 0
+
+    def retrieve(self, query: str, top_k: int = 4):
+        self.last_query = query
+        self.last_top_k = top_k
+        return self.hits
+
+
 def test_chat_from_old_checkpoint_forks_parallel_timeline(tmp_path: Path):
     settings = _settings(tmp_path)
     store = MemoryStore(settings.conversation_db)
@@ -215,3 +227,71 @@ def test_chat_at_latest_checkpoint_keeps_same_timeline(tmp_path: Path):
 
     assert second.session_id == "mirdo:slot_01"
     assert not hasattr(second, "forked_from") or second.forked_from == ""
+
+
+def test_agent_style_ordered_messages_use_clean_queries_and_final_intent(tmp_path: Path):
+    settings = _settings(tmp_path)
+    store = MemoryStore(settings.conversation_db)
+    store.initialize()
+    fake_model = _FakeChatModel('{"dialogue":"好呀老师，我陪你看入口。","emotion":"温和","action":"listen"}')
+    llm_provider = LLMProvider(settings, chat_model_factory=lambda _resolved: fake_model)
+    memory_retriever = _FakeMemoryRetriever([])
+    rag_retriever = _FakeRagRetriever([])
+    orchestrator = ChatOrchestrator(
+        settings=settings,
+        memory_store=store,
+        llm_provider=llm_provider,
+        memory_retriever=memory_retriever,
+        rag_retriever=rag_retriever,
+    )
+    player_text = "\n".join(
+        [
+            "玩家连续输入了几句话，请像 AI Agent 处理连续用户消息一样按时间顺序理解：",
+            "后续内容可能是补充、修正、打断、强调或新目标；不要机械逐句回答，综合判断玩家当前最终意图后自然回应。",
+            "第1句：你先别去食物柜。",
+            "随后：刚才门口好像有声音。",
+            "继续：先陪我看一下入口。",
+        ]
+    )
+
+    response = orchestrator.chat(
+        ChatRequest(
+            session_id="s1",
+            player_text=player_text,
+            context={
+                "ai_nav_points": [
+                    {"id": "food_cabinet", "name": "食物柜", "tags": ["food"], "action_options": ["work_count_supplies"]},
+                    {"id": "entrance", "name": "入口", "tags": ["door", "entrance"], "action_options": ["look_around"]},
+                ]
+            },
+        )
+    )
+
+    assert "玩家连续输入" not in memory_retriever.last_query
+    assert "玩家连续输入" not in rag_retriever.last_query
+    flattened = "\n".join(content for _role, content in fake_model.last_messages)
+    assert "连续玩家输入处理规则" in flattened
+    assert response.command != "go_to_nav_point" or response.command_payload.get("target_nav_point") != "food_cabinet"
+
+
+def test_agent_style_ordered_messages_memory_extraction_uses_latest_correction(tmp_path: Path):
+    settings = _settings(tmp_path)
+    store = MemoryStore(settings.conversation_db)
+    store.initialize()
+    fake_model = _FakeChatModel('{"dialogue":"我记住了，老师。","emotion":"温和","action":"listen"}')
+    llm_provider = LLMProvider(settings, chat_model_factory=lambda _resolved: fake_model)
+    orchestrator = ChatOrchestrator(settings=settings, memory_store=store, llm_provider=llm_provider)
+    player_text = "\n".join(
+        [
+            "玩家连续输入了几句话，请像 AI Agent 处理连续用户消息一样按时间顺序理解：",
+            "第1句：记住我喜欢罐头汤。",
+            "随后：不对，记住我喜欢清水。",
+        ]
+    )
+
+    orchestrator.chat(ChatRequest(session_id="s1", player_text=player_text))
+
+    snapshot = store.get_session_snapshot("s1")
+    facts = {(fact["predicate"], fact["value"]) for fact in snapshot["memory_facts"]}
+    assert ("likes", "清水") in facts
+    assert ("likes", "罐头汤") not in facts

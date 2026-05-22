@@ -61,12 +61,21 @@ class MemoryRAGRetriever:
                         k=min(safe_k, 20),
                         filter={"session_id": str(session_id or "default_session").strip() or "default_session"},
                     )
+                missing_fact_ids: list[int] = []
+                parsed_hits: list[int] = []
                 for doc, _score in hits:
                     raw_id = doc.metadata.get("memory_fact_id", 0)
                     try:
                         fact_id = int(raw_id)
                     except (TypeError, ValueError):
                         continue
+                    parsed_hits.append(fact_id)
+                    if fact_id not in by_id:
+                        missing_fact_ids.append(fact_id)
+                if missing_fact_ids:
+                    for fact in self.memory_store.get_memory_facts_by_ids(session_id, missing_fact_ids):
+                        by_id[fact.id] = fact
+                for fact_id in parsed_hits:
                     fact = by_id.get(fact_id)
                     if fact is None or fact.id in seen:
                         continue

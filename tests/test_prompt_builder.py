@@ -107,3 +107,54 @@ def test_prompt_builder_includes_real_outing_return_rule():
     assert "不要输出 go_to_object" in flattened
     assert "location_name=超市" in flattened
     assert "health_damage=4" in flattened
+
+
+def test_prompt_builder_includes_task_chain_context_and_recent_command_payload():
+    builder = PromptBuilder()
+    request = ChatRequest(
+        session_id="s1",
+        player_text="到镜子以后继续判断下一步",
+        context={
+            "source_decision": {
+                "kind": "external_goal_follow_up",
+                "chain_id": "mirror_chain",
+                "chain_depth": 2,
+                "target_nav_point": "bathroom_mirror_look",
+                "target_name": "卫生间镜子",
+            },
+            "task_chain": {
+                "chain_id": "mirror_chain",
+                "chain_depth": 2,
+                "goal": "检查卫生间镜子",
+                "last_target": "bathroom_mirror_look",
+                "visited_targets": ["bathroom_mirror_look"],
+            },
+        },
+    )
+
+    messages = builder.build(
+        request=request,
+        recent_turns=[
+            {"role": "user", "content": "去厕所看看镜子里面有什么。"},
+            {
+                "role": "assistant",
+                "content": "好呀老师，我去看看镜子。",
+                "payload": {
+                    "command": "go_to_nav_point",
+                    "command_payload": {
+                        "target_nav_point": "bathroom_mirror_look",
+                        "chain_id": "mirror_chain",
+                        "chain_depth": 1,
+                    },
+                },
+            },
+        ],
+    )
+
+    flattened = "\n".join(content for _role, content in messages)
+    assert "task_chain=chain_id=mirror_chain" in flattened
+    assert "goal=检查卫生间镜子" in flattened
+    assert "source_decision=kind=external_goal_follow_up" in flattened
+    assert "assistant: 好呀老师，我去看看镜子。" in flattened
+    assert "chain_id=mirror_chain depth=1 command=go_to_nav_point target=bathroom_mirror_look" in flattened
+    assert "是否继续、结束或换目标由你判断" in flattened

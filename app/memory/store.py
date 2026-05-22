@@ -243,6 +243,33 @@ class MemoryStore:
             ).fetchall()
         return [self._fact_from_row(row) for row in rows]
 
+    def get_memory_facts_by_ids(self, session_id: str, fact_ids: list[int] | set[int] | tuple[int, ...]) -> list[MemoryFact]:
+        clean_session = self._clean_session_id(session_id)
+        ids: list[int] = []
+        seen: set[int] = set()
+        for raw_id in fact_ids:
+            try:
+                fact_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if fact_id <= 0 or fact_id in seen:
+                continue
+            ids.append(fact_id)
+            seen.add(fact_id)
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select * from memory_facts
+                where session_id = ? and active = 1 and id in ({placeholders})
+                """,
+                (clean_session, *ids),
+            ).fetchall()
+        by_id = {int(row["id"]): self._fact_from_row(row) for row in rows}
+        return [by_id[fact_id] for fact_id in ids if fact_id in by_id]
+
     def search_memory_facts(self, session_id: str, query: str, limit: int = 12) -> list[MemoryFact]:
         """Return active facts ranked for the current player input.
 

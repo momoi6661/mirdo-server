@@ -56,6 +56,11 @@ class PromptBuilder:
                 "常见别名：食品柜/食物柜/补给柜=food_cabinet，医疗柜/药柜=medical_cabinet，武器柜/装备柜=equipment_cabinet，杂物箱/物资箱/工具箱=utility_storage_box。",
                 "查看/检查用 marker_role=\"approach\" 或 \"look\"；打开用 marker_role=\"open\"；坐下/休息才使用 Rest 或 sit 相关命令，不能把查看柜子理解成去椅子休息。",
                 "如果 context.event=\"real_outing_return\" 且 real_outing=true：这代表老师真实外出归来。只输出欢迎/关心短对白和轻量动作，不要输出 go_to_object、go_to_nav_point、follow_player 或任何移动命令。",
+                "行动结果回调规则：如果 runtime_state.source_decision.kind=external_goal_follow_up，表示 Mirdo 已经到达上一个目标。必须先给老师一个具体观察/结果反馈；如果确实需要继续任务链，可以输出新的 command/command_payload 到不同目标。不要重复移动到 source_decision 里的同一 target_nav_point/target_object；没有必要继续时 command 留空。",
+                "任务链决策规则：source_decision.chain_depth 表示连续衍生任务深度。是否继续、结束或换目标由你判断；深度较高时应更谨慎，但不要因为数字到阈值就机械停止。如果玩家目标明显还没完成，可以继续输出新 command；如果已经完成，就反馈结果并留空 command。新的 command_payload 会由系统带上 chain_id/chain_depth。",
+                "自主任务规则：如果 runtime_state.source_decision.kind=autonomous_task，表示 Mirdo 主动请求一次自然行为决策。可以同时输出对白、表情、身体动作和 command/command_payload；也可以只说一句观察。优先围绕避难所生存状态：食物/饮水、医疗药品、武器装备、工具材料、门口和外出风险。不要无意义移动；移动目标必须来自已知导航点或当前感知物体。",
+                "自主任务说话示例风格：‘老师，我去清点一下食物和水。’、‘武器柜好像要确认一下，外出会危险。’、‘医疗柜我看一眼，药品不能少。’；不要固定复读同一句。",
+                "连续玩家输入处理规则：如果 user 内容包含“玩家连续输入了几句话/AI Agent/第1句/随后/继续”，必须按时间顺序理解；后续句可能是补充、修正、打断、强调或新目标。不要逐句分别回答，只判断老师当前最终意图；出现“先别、等等、不是、不对、改成、别去、不要、先陪”等修正信号时以后续句为准。",
                 "只输出 JSON，不要输出 markdown，不要解释，不要在 JSON 外输出任何文字。",
                 "JSON 字段：dialogue, emotion, expression, action, command, command_payload, visemes, viseme_sequence, stat_change, memory_tags, memory_updates。",
                 "memory_updates 是数组；只有当玩家明确告诉你偏好、名字、承诺、重要事实时才写入，格式为 {\"subject\":\"player\",\"predicate\":\"likes\",\"value\":\"罐头汤\",\"confidence\":0.8}。",
@@ -96,6 +101,8 @@ class PromptBuilder:
                 f"perception={self._format_perception(request.context.get('perception') if isinstance(request.context, dict) else None)}",
                 f"known_nav_points={self._format_nav_points(request.context if isinstance(request.context, dict) else None)}",
                 f"outing_return={self._format_outing_return(request.context if isinstance(request.context, dict) else None)}",
+                f"source_decision={self._format_source_decision(request.context if isinstance(request.context, dict) else None)}",
+                f"task_chain={self._format_task_chain(request.context if isinstance(request.context, dict) else None)}",
             ]
         )
 
@@ -103,6 +110,38 @@ class PromptBuilder:
         context = request.context if isinstance(request.context, dict) else {}
         npc = context.get("npc", {})
         return npc if isinstance(npc, dict) else {}
+
+    def _format_task_chain(self, context: Any) -> str:
+        if not isinstance(context, dict):
+            return "(none)"
+        chain = context.get("task_chain", context.get("ai_task_chain", {}))
+        if not isinstance(chain, dict) or not chain:
+            decision = context.get("source_decision", {})
+            if isinstance(decision, dict) and str(decision.get("chain_id", "") or "").strip():
+                return "chain_id={chain_id} chain_depth={chain_depth}".format(
+                    chain_id=decision.get("chain_id", ""),
+                    chain_depth=decision.get("chain_depth", ""),
+                )
+            return "(none)"
+        keys = ["chain_id", "chain_depth", "status", "goal", "last_result", "last_target", "visited_targets", "pending_question", "should_continue"]
+        parts: list[str] = []
+        for key in keys:
+            if key not in chain:
+                continue
+            value = chain.get(key, "")
+            if isinstance(value, list):
+                value = ",".join(str(item) for item in value[-8:])
+            parts.append(f"{key}={value}")
+        return " ".join(parts) if parts else "(none)"
+
+    def _format_source_decision(self, context: Any) -> str:
+        if not isinstance(context, dict):
+            return "(none)"
+        decision = context.get("source_decision", {})
+        if not isinstance(decision, dict) or not decision:
+            return "(none)"
+        keys = ["kind", "event", "target_nav_point", "target_object", "target_name", "target_description", "action_hint", "arrival_action", "marker_role", "chain_depth", "chain_id"]
+        return " ".join(f"{key}={decision.get(key, '')}" for key in keys if key in decision)
 
     def _format_outing_return(self, context: Any) -> str:
         if not isinstance(context, dict):
@@ -208,9 +247,39 @@ class PromptBuilder:
         for turn in turns[-12:]:
             role = self._get_value(turn, "role", "unknown")
             content = self._get_value(turn, "content", "")
-            if content:
-                lines.append(f"{role}: {content}")
+            payload = self._get_value(turn, "payload", {})
+            chain_text = self._format_turn_chain_payload(payload)
+            if content or chain_text:
+                suffix = f" [{chain_text}]" if chain_text else ""
+                lines.append(f"{role}: {content}{suffix}")
         return "\n".join(lines) if lines else "(none)"
+
+    def _format_turn_chain_payload(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        command = str(payload.get("command", "") or "").strip()
+        command_payload = payload.get("command_payload", {})
+        if not isinstance(command_payload, dict):
+            command_payload = {}
+        context = payload.get("context", {})
+        source = context.get("source_decision", {}) if isinstance(context, dict) else {}
+        if not isinstance(source, dict):
+            source = {}
+        chain_id = str(command_payload.get("chain_id", source.get("chain_id", "")) or "").strip()
+        chain_depth = command_payload.get("chain_depth", source.get("chain_depth", ""))
+        target = str(command_payload.get("target_nav_point", command_payload.get("target_object", "")) or "").strip()
+        if not chain_id and not command and not target:
+            return ""
+        parts: list[str] = []
+        if chain_id:
+            parts.append(f"chain_id={chain_id}")
+        if chain_depth != "":
+            parts.append(f"depth={chain_depth}")
+        if command:
+            parts.append(f"command={command}")
+        if target:
+            parts.append(f"target={target}")
+        return " ".join(parts)
 
     def _format_memory_facts(self, facts: list[Any]) -> str:
         if not facts:

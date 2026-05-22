@@ -122,3 +122,75 @@ def test_chat_orchestrator_uses_json_mode_for_complete_response(tmp_path: Path):
 
     assert response.dialogue == "收到，老师。"
     assert calls and calls[0]["json_mode"] is True
+
+
+class _SequenceFakeChatModel:
+    def __init__(self, contents: list[str]) -> None:
+        self.contents = list(contents)
+        self.last_messages = None
+        self.all_messages = []
+
+    def invoke(self, messages):
+        self.last_messages = messages
+        self.all_messages.append(messages)
+        content = self.contents.pop(0) if self.contents else '{"dialogue":"嗯，老师。","action":"Talk"}'
+        return _FakeMessage(content)
+
+
+def test_chat_orchestrator_carries_task_chain_command_payload_into_next_prompt(tmp_path: Path):
+    settings = Settings(
+        runtime_dir=tmp_path,
+        conversation_db=tmp_path / "conversations.sqlite3",
+        chroma_dir=tmp_path / "chroma",
+        knowledge_dir=tmp_path / "knowledge",
+        api_base_url="http://localhost:11434/v1",
+        api_key="",
+        chat_model="qwen3",
+    )
+    store = MemoryStore(settings.conversation_db)
+    store.initialize()
+    fake_model = _SequenceFakeChatModel(
+        [
+            '{"dialogue":"好呀老师，我去看看镜子。","emotion":"认真","expression":"neutral","action":"walk","command":"go_to_nav_point","command_payload":{"target_nav_point":"bathroom_mirror_look","chain_id":"mirror_chain","chain_depth":1}}',
+            '{"dialogue":"老师，镜子这边我看过啦，暂时没发现奇怪的东西。","emotion":"认真","expression":"neutral","action":"cute_explain"}',
+        ]
+    )
+    llm_provider = LLMProvider(settings, chat_model_factory=lambda _resolved: fake_model)
+    orchestrator = ChatOrchestrator(settings=settings, memory_store=store, llm_provider=llm_provider)
+
+    nav_context = {
+        "known_nav_points": [
+            {
+                "id": "bathroom_mirror_look",
+                "name": "卫生间镜子检查点",
+                "type": "bathroom",
+                "description": "可以观察镜子和洗手台。",
+            }
+        ]
+    }
+    first = orchestrator.chat(ChatRequest(session_id="s1", player_text="去厕所看看镜子里面有什么。", context=nav_context))
+    assert first.command == "go_to_nav_point"
+    assert first.command_payload["chain_id"] == "mirror_chain"
+
+    follow_up_context = dict(nav_context)
+    follow_up_context["source_decision"] = {
+        "kind": "external_goal_follow_up",
+        "event": "navigation_goal_finished",
+        "target_nav_point": "bathroom_mirror_look",
+        "target_name": "卫生间镜子",
+        "chain_id": "mirror_chain",
+        "chain_depth": 2,
+    }
+    second = orchestrator.chat(
+        ChatRequest(
+            session_id="s1",
+            player_text="Mirdo 已经到达卫生间镜子，请反馈结果并判断是否继续。",
+            context=follow_up_context,
+        )
+    )
+
+    assert second.command == ""
+    flattened_second_prompt = "\n".join(content for _role, content in fake_model.all_messages[-1])
+    assert "recent_dialogue" in flattened_second_prompt
+    assert "chain_id=mirror_chain depth=1 command=go_to_nav_point target=bathroom_mirror_look" in flattened_second_prompt
+    assert "source_decision=kind=external_goal_follow_up" in flattened_second_prompt

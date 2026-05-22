@@ -6,6 +6,7 @@ import time
 
 from .config import Settings
 from .character_ai import CharacterBehaviorPlanner
+from .dialogue_text import compact_player_query, memory_extraction_text
 from .llm_provider import LLMProvider
 from .memory.extractor import MemoryExtractor
 from .memory.store import MemoryStore
@@ -63,7 +64,7 @@ class ChatOrchestrator:
         self._log_timing("prompt_built messages=%d" % len(messages), started, request.session_id)
 
         memory_updates: list[dict[str, Any]] = []
-        memory_updates.extend(self.memory_extractor.extract(request.player_text))
+        memory_updates.extend(self.memory_extractor.extract(memory_extraction_text(request.player_text)))
 
         try:
             chat_model = self.llm_provider.build_chat_model(request.provider, json_mode=True)
@@ -154,18 +155,19 @@ class ChatOrchestrator:
         return text
 
     def _retrieve_memory(self, request: ChatRequest) -> list[dict[str, Any]]:
+        query = compact_player_query(request.player_text)
         if self.memory_retriever is not None:
             try:
-                return list(self.memory_retriever.retrieve(request.session_id, request.player_text, top_k=12))
+                return list(self.memory_retriever.retrieve(request.session_id, query, top_k=12))
             except Exception:
                 pass
-        return [fact.to_dict() for fact in self.memory_store.search_memory_facts(request.session_id, request.player_text, limit=12)]
+        return [fact.to_dict() for fact in self.memory_store.search_memory_facts(request.session_id, query, limit=12)]
 
     def _retrieve_knowledge(self, request: ChatRequest) -> list[dict[str, Any]]:
         if self.rag_retriever is None:
             return []
         try:
-            return list(self.rag_retriever.retrieve(request.player_text, top_k=self.settings.top_k))
+            return list(self.rag_retriever.retrieve(compact_player_query(request.player_text), top_k=self.settings.top_k))
         except Exception:
             return []
 

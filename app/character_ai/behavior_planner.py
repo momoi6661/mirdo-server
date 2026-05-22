@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..dialogue_text import effective_player_intent_text
 from ..schemas import ChatRequest, ChatResponse
 
 
@@ -106,7 +107,7 @@ class CharacterBehaviorPlanner:
         actions = self._available_actions(request)
         expressions = self._available_expressions(request)
         visemes = self._available_visemes(request)
-        text = request.player_text.strip()
+        text = self._intent_text(request)
 
         status_answer = self._status_answer(request)
         if status_answer is not None:
@@ -116,6 +117,14 @@ class CharacterBehaviorPlanner:
             response.action = action
             response.command = ""
             response.command_payload = {}
+
+        external_goal = self._external_goal_follow_up_decision(request)
+        if external_goal:
+            self._repair_external_goal_follow_up_command(external_goal, response)
+
+        autonomous_task = self._autonomous_task_decision(request)
+        if autonomous_task:
+            self._repair_autonomous_task_command(request, autonomous_task, response)
 
         self._sanitize_dialogue(response, request)
         response.expression = self._normalize_expression(response.expression, response.emotion, expressions)
@@ -151,18 +160,50 @@ class CharacterBehaviorPlanner:
 
         response.command = self._normalize_command(response.command)
         if response.command == "go_to_nav_point":
-            self._repair_go_to_nav_point_payload(request, response)
+            if not autonomous_task:
+                self._repair_go_to_nav_point_payload(request, response)
             if not response.command_payload.get("target_nav_point"):
                 response.command = ""
                 response.command_payload = {}
-        if response.command == "go_to_object" and not response.command_payload.get("target_object"):
-            response.command = ""
-            response.command_payload = {}
+        if response.command == "go_to_object":
+            if not autonomous_task and response.command_payload.get("target_object"):
+                self._repair_go_to_payload(request, response)
+            if not response.command_payload.get("target_object"):
+                response.command = ""
+                response.command_payload = {}
         if response.command in {"follow_player", "stop_follow", "look_at_player"}:
             response.command_payload = response.command_payload if isinstance(response.command_payload, dict) else {}
         return response
 
     def local_fallback_response(self, request: ChatRequest) -> ChatResponse | None:
+        external_goal = self._external_goal_follow_up_decision(request)
+        if external_goal:
+            target = self._external_goal_target_label(external_goal)
+            lowered = " ".join(str(external_goal.get(key, "")) for key in ("target_name", "target_description", "action_hint", "target_nav_point", "target_object")).lower()
+            if "镜" in lowered or "mirror" in lowered:
+                dialogue = f"老师，{target}这边我看过啦，暂时没发现奇怪的东西。"
+            elif any(word in lowered for word in ("厕所", "卫生间", "浴室", "toilet", "bath")):
+                dialogue = f"老师，{target}这边我看过了，可以再检查别处。"
+            else:
+                dialogue = f"老师，{target}这边我看过啦，暂时没发现异常。"
+            return ChatResponse(
+                dialogue=dialogue,
+                emotion="认真",
+                expression="neutral",
+                action=str(external_goal.get("arrival_action", "cute_explain") or "cute_explain"),
+                command="",
+                command_payload={},
+                visemes="aa、ih、ou",
+                memory_tags=["local_external_goal_follow_up"],
+                session_id=request.session_id,
+                fallback=True,
+                error="model_call_failed",
+            )
+
+        autonomous_task = self._autonomous_task_decision(request)
+        if autonomous_task:
+            return self._autonomous_task_fallback_response(request, autonomous_task)
+
         status_answer = self._status_answer(request)
         if status_answer is not None:
             dialogue, expression, action = status_answer
@@ -180,7 +221,7 @@ class CharacterBehaviorPlanner:
                 error="model_call_failed",
             )
 
-        lower = request.player_text.lower()
+        lower = self._intent_text(request).lower()
         if self._contains_any(lower, ("跟着我", "跟上", "follow me", "come with me")):
             return ChatResponse(
                 dialogue="嗯，我跟着老师走。你慢一点的话，我也会努力跟上的。",
@@ -231,7 +272,7 @@ class CharacterBehaviorPlanner:
         return dummy
 
     def _status_answer(self, request: ChatRequest) -> tuple[str, str, str] | None:
-        lower = request.player_text.lower().strip()
+        lower = self._intent_text(request).lower().strip()
         asks_hunger = self._contains_any(lower, ("饿不饿", "饿吗", "你饿", "肚子饿", "hungry"))
         asks_thirst = self._contains_any(lower, ("渴不渴", "渴吗", "你渴", "口渴", "thirsty"))
         asks_tired = self._contains_any(lower, ("累不累", "累吗", "你累", "困不困", "困吗", "疲惫", "tired", "sleepy"))
@@ -289,7 +330,7 @@ class CharacterBehaviorPlanner:
             return default
 
     def _plan_from_player_text(self, request: ChatRequest, response: ChatResponse) -> tuple[str, dict[str, Any], str, str] | None:
-        text = request.player_text.strip()
+        text = self._intent_text(request)
         lower = text.lower()
         if self._contains_any(lower, ("别跟", "停下", "不用跟", "stop follow", "stay")):
             return "stop_follow", {}, "idle_normal", "neutral"
@@ -326,29 +367,42 @@ class CharacterBehaviorPlanner:
         payload = response.command_payload if isinstance(response.command_payload, dict) else {}
         target = str(payload.get("target_object", payload.get("target_ref", ""))).strip()
         if target and self._perception_has_object(request, target):
-            response.command_payload = {"target_object": target, "marker_role": str(payload.get("marker_role", "approach") or "approach")}
+            response.command_payload = self._preserve_payload_chain(
+                payload,
+                {"target_object": target, "marker_role": str(payload.get("marker_role", "approach") or "approach")},
+            )
             return
-        rule = self._match_object_rule(request.player_text, request)
+        rule = self._match_object_rule(self._intent_text(request), request)
         if rule is None:
             response.command_payload = payload
             return
         resolved = self._resolve_target_object(rule, request)
         if resolved:
-            response.command_payload = {"target_object": resolved, "marker_role": str(payload.get("marker_role", "approach") or "approach")}
+            response.command_payload = self._preserve_payload_chain(
+                payload,
+                {"target_object": resolved, "marker_role": str(payload.get("marker_role", "approach") or "approach")},
+            )
 
     def _repair_go_to_nav_point_payload(self, request: ChatRequest, response: ChatResponse) -> None:
         payload = response.command_payload if isinstance(response.command_payload, dict) else {}
         target = str(payload.get("target_nav_point", payload.get("nav_point", payload.get("point_id", "")))).strip()
         if target and self._nav_point_exists(request, target):
-            response.command_payload = {"target_nav_point": target}
+            response.command_payload = self._preserve_payload_chain(payload, {"target_nav_point": target})
             return
-        rule = self._match_object_rule(request.player_text, request)
+        rule = self._match_object_rule(self._intent_text(request), request)
         if rule is None:
             response.command_payload = payload
             return
         resolved = self._resolve_target_nav_point(rule, request)
         if resolved:
-            response.command_payload = {"target_nav_point": resolved}
+            response.command_payload = self._preserve_payload_chain(payload, {"target_nav_point": resolved})
+
+    def _preserve_payload_chain(self, original: dict[str, Any], repaired: dict[str, Any]) -> dict[str, Any]:
+        """Keep task-chain metadata when repairing executable target payloads."""
+        for key in ("chain_id", "chain_depth", "task_id", "parent_chain_id"):
+            if key in original and key not in repaired:
+                repaired[key] = original[key]
+        return repaired
 
     def _match_object_rule(self, text: str, request: ChatRequest) -> ObjectRule | None:
         lower = text.lower()
@@ -567,6 +621,172 @@ class CharacterBehaviorPlanner:
         payload = context.get("real_outing_return", context.get("outing_return", {}))
         return isinstance(payload, dict) and bool(payload.get("real_outing", False))
 
+    def _autonomous_task_decision(self, request: ChatRequest) -> dict[str, Any]:
+        context = request.context if isinstance(request.context, dict) else {}
+        source = context.get("source_decision", {})
+        if not isinstance(source, dict):
+            return {}
+        if str(source.get("kind", "")).strip() != "autonomous_task":
+            return {}
+        return source
+
+    def _repair_autonomous_task_command(self, request: ChatRequest, decision: dict[str, Any], response: ChatResponse) -> None:
+        payload = response.command_payload if isinstance(response.command_payload, dict) else {}
+        command = self._normalize_command(response.command)
+        response.command = command
+        if not command:
+            response.command_payload = {}
+            return
+        if command == "go_to_nav_point":
+            target = str(payload.get("target_nav_point", payload.get("nav_point", payload.get("point_id", ""))) or "").strip()
+            if not target or not self._nav_point_exists(request, target):
+                response.command = ""
+                response.command_payload = {}
+                return
+            response.command_payload = {"target_nav_point": target}
+        elif command == "go_to_object":
+            target = str(payload.get("target_object", payload.get("target_ref", "")) or "").strip()
+            if not target or not self._perception_has_object(request, target):
+                response.command = ""
+                response.command_payload = {}
+                return
+            response.command_payload = {"target_object": target, "marker_role": str(payload.get("marker_role", "approach") or "approach")}
+        else:
+            response.command_payload = payload if isinstance(payload, dict) else {}
+            return
+        chain_id = str(decision.get("chain_id", "") or "").strip()
+        if chain_id:
+            response.command_payload["chain_id"] = chain_id
+        response.command_payload["chain_depth"] = int(decision.get("chain_depth", 0) or 0)
+
+    def _autonomous_task_fallback_response(self, request: ChatRequest, decision: dict[str, Any]) -> ChatResponse | None:
+        nav_point = self._pick_autonomous_nav_point(request)
+        if nav_point:
+            lowered = self._entry_haystack(nav_point)
+            point_id = str(nav_point.get("id", "")).strip()
+            if any(word in lowered for word in ("weapon", "equipment", "武器", "装备")):
+                dialogue = "老师，我去看看武器柜，外出前装备要确认一下。"
+                action = "work_inspect_cabinet"
+            elif any(word in lowered for word in ("medical", "medicine", "药", "医疗")):
+                dialogue = "老师，我去看一眼医疗柜，药品不能太少。"
+                action = "work_check_shelf"
+            elif any(word in lowered for word in ("food", "water", "supplies", "食物", "饮水")):
+                dialogue = "老师，我去清点一下食物和水，心里会安心点。"
+                action = "work_count_supplies"
+            else:
+                dialogue = "老师，我去看一下那边，确认避难所没问题。"
+                action = "curious_peek"
+            return ChatResponse(
+                dialogue=dialogue,
+                emotion="认真",
+                expression="neutral",
+                action=action,
+                command="go_to_nav_point",
+                command_payload={
+                    "target_nav_point": point_id,
+                    "chain_id": str(decision.get("chain_id", "") or ""),
+                    "chain_depth": int(decision.get("chain_depth", 0) or 0),
+                },
+                visemes="aa、ih、ou",
+                memory_tags=["local_autonomous_task"],
+                session_id=request.session_id,
+                fallback=True,
+                error="model_call_failed",
+            )
+        return ChatResponse(
+            dialogue="老师，我先轻轻看一下避难所，食物、水和外出装备都要留意。",
+            emotion="认真",
+            expression="neutral",
+            action="look_around",
+            command="",
+            command_payload={},
+            visemes="aa、ih、ou",
+            memory_tags=["local_autonomous_task"],
+            session_id=request.session_id,
+            fallback=True,
+            error="model_call_failed",
+        )
+
+    def _pick_autonomous_nav_point(self, request: ChatRequest) -> dict[str, Any] | None:
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for entry in self._nav_point_entries(request):
+            point_id = str(entry.get("id", "")).strip()
+            if not point_id:
+                continue
+            haystack = self._entry_haystack(entry)
+            score = 0
+            if any(word in haystack for word in ("food", "water", "supplies", "食物", "饮水")):
+                score += 30
+            if any(word in haystack for word in ("weapon", "equipment", "武器", "装备")):
+                score += 26
+            if any(word in haystack for word in ("medical", "medicine", "first_aid", "医疗", "药")):
+                score += 24
+            if any(word in haystack for word in ("tool", "utility", "工具", "材料")):
+                score += 18
+            if any(word in haystack for word in ("door", "exit", "risk", "门", "外出", "危险")):
+                score += 14
+            if score > 0:
+                scored.append((score, entry))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
+
+    def _external_goal_follow_up_decision(self, request: ChatRequest) -> dict[str, Any]:
+        context = request.context if isinstance(request.context, dict) else {}
+        source = context.get("source_decision", {})
+        if not isinstance(source, dict):
+            return {}
+        if str(source.get("kind", "")).strip() != "external_goal_follow_up":
+            return {}
+        if str(source.get("event", "")).strip() not in {"", "navigation_goal_finished"}:
+            return {}
+        return source
+
+    def _external_goal_target_label(self, decision: dict[str, Any]) -> str:
+        for key in ("target_name", "target_nav_point", "target_object"):
+            value = str(decision.get(key, "") or "").strip()
+            if value:
+                return value
+        return "目标位置"
+
+    def _repair_external_goal_follow_up_command(self, decision: dict[str, Any], response: ChatResponse) -> None:
+        payload = response.command_payload if isinstance(response.command_payload, dict) else {}
+        command = self._normalize_command(response.command)
+        response.command = command
+        if not command:
+            response.command_payload = {}
+            return
+
+        current_nav = str(decision.get("target_nav_point", "") or "").strip()
+        current_obj = str(decision.get("target_object", "") or "").strip()
+        next_nav = str(payload.get("target_nav_point", payload.get("nav_point", payload.get("point_id", ""))) or "").strip()
+        next_obj = str(payload.get("target_object", payload.get("target_ref", "")) or "").strip()
+
+        repeats_current_nav = command == "go_to_nav_point" and current_nav and next_nav == current_nav
+        repeats_current_obj = command == "go_to_object" and current_obj and next_obj == current_obj
+        if repeats_current_nav or repeats_current_obj:
+            response.command = ""
+            response.command_payload = {}
+            return
+
+        if command == "go_to_nav_point" and not next_nav:
+            response.command = ""
+            response.command_payload = {}
+            return
+        if command == "go_to_object" and not next_obj:
+            response.command = ""
+            response.command_payload = {}
+            return
+
+        chain_id = str(decision.get("chain_id", "") or "").strip()
+        if chain_id and "chain_id" not in payload:
+            payload["chain_id"] = chain_id
+        chain_depth = int(decision.get("chain_depth", 0) or 0)
+        if chain_depth > 0 and "chain_depth" not in payload:
+            payload["chain_depth"] = chain_depth
+        response.command_payload = payload
+
     def _first_available(self, actions: set[str], preferred: tuple[str, ...]) -> str:
         for action in preferred:
             if action in actions:
@@ -590,3 +810,6 @@ class CharacterBehaviorPlanner:
     def _contains_any(self, text: str, needles: tuple[str, ...]) -> bool:
         lower = text.lower()
         return any(str(needle).lower() in lower for needle in needles)
+
+    def _intent_text(self, request: ChatRequest) -> str:
+        return effective_player_intent_text(request.player_text)

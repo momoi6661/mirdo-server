@@ -132,3 +132,16 @@ def test_memory_store_forks_session_at_checkpoint(tmp_path: Path):
     assert [fact.value for fact in facts] == ["罐头汤"]
     assert store.get_latest_turn_id("main") > first_assistant.id
     assert store.get_latest_turn_id("branch") > 0
+
+
+def test_memory_store_gets_active_facts_by_ids(tmp_path: Path):
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    store.initialize()
+    first = store.upsert_memory_fact("session-a", "player", "likes", "清水", 0.9, 0)
+    second = store.upsert_memory_fact("session-a", "player", "dislikes", "噪声", 0.8, 0)
+    other_session = store.upsert_memory_fact("session-b", "player", "likes", "罐头汤", 0.7, 0)
+    store.delete_memory_fact("session-a", second.id)
+
+    facts = store.get_memory_facts_by_ids("session-a", [first.id, second.id, other_session.id, 999999])
+
+    assert [fact.id for fact in facts] == [first.id]
