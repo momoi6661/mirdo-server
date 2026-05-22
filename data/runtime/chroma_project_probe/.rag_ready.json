@@ -1,0 +1,8 @@
+{
+  "ready": true,
+  "collection": "world_knowledge",
+  "chunks_indexed": 3112,
+  "embedding_provider": "local_hash",
+  "include_project_tree": true,
+  "updated_at": "2026-05-21T13:07:26.847844+00:00"
+}

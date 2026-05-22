@@ -1,0 +1,8 @@
+{
+  "ready": true,
+  "collection": "world_knowledge",
+  "chunks_indexed": 23,
+  "embedding_provider": "fastembed",
+  "include_project_tree": false,
+  "updated_at": "2026-05-22T02:30:55.589547+00:00"
+}
