@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual env / local env
 .venv/
@@ -14,16 +16,46 @@ venv/
 data/runtime/
 data/models/fastembed/
 *.log
+*.sqlite3
+*.db
+*.wav
+*.mp3
+*.ogg
+
+# Keep versioned TTS/profile definitions, ignore generated audio only.
+!data/tts/
+!data/tts/**/
+!data/tts/**/*.json
+!data/tts/**/*.md
 
 # Local IDE / automation
 .idea/
+.vscode/
 .codex_tmp/
 .learnings/
+.omd/
 
-# Exported game binaries
-*.exe
-*.pck
+# Docker/local build artifacts
+.docker/
+docker-data/
 build/
 builds/
 dist/
 exports/
+*.exe
+*.pck
+*.zip
+*.7z
+*.rar
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
