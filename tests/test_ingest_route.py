@@ -20,7 +20,7 @@ def test_ingest_route_and_health_rag_ready(tmp_path: Path):
 
     with TestClient(app) as client:
         before = client.get("/health").json()
-        assert before["rag_ready"] is False
+        assert before["rag_ready"] is True
 
         ingest = client.post("/ingest", json={"clear_first": True})
         assert ingest.status_code == 200

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +44,28 @@ class NpcStats(BaseModel):
     favor: float = 0.0
 
 
+class SteeringInput(BaseModel):
+    """客户端对正在生成或呈现中的回合发出的最新引导。
+
+    已经提交给上游模型的 HTTP 请求无法原地修改，因此实现方式和 Codex
+    类似：旧请求失效，新请求携带目标 request id 和当前阶段重新进入 Agent。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["none", "interrupt", "append", "replace"] = "none"
+    phase: Literal["idle", "generation", "presentation", "action"] = "idle"
+    target_request_id: str = ""
+    target_client_sequence: int = Field(default=0, ge=0)
+    interrupted_dialogue: str = Field(default="", max_length=500)
+    reason: str = ""
+
+    @field_validator("target_request_id", "interrupted_dialogue", "reason", mode="before")
+    @classmethod
+    def _clean_text(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -56,7 +78,22 @@ class ChatRequest(BaseModel):
     given_item: str = ""
     context: dict[str, Any] = Field(default_factory=dict)
     max_context_turns: int = 8
+    # 默认只返回文字；请求明确传 true 时，后端才调用 VOICEVOX。
+    use_tts: bool = False
+    tts_voice_profile: str = "mirdo_ja"
+    # 可选的 VOICEVOX 风格 ID；传入后优先于 profile 文件里的 speaker_id。
+    tts_speaker_id: int | None = Field(default=None, ge=0)
+    # 默认只生成中文对白；请求明确传 true 时，Agent 才补充平行的日语字段。
+    generate_japanese: bool = False
     provider: ProviderConfig | None = None
+    # Godot 用它们标记“同一输入框里的最新意图”。旧请求完成后若发现自己
+    # 已被更新，会被服务端标记为 superseded，不再写入助手回合。
+    client_request_id: str = ""
+    client_sequence: int = Field(default=0, ge=0)
+    supersedes_request_id: str = ""
+    # 新输入若针对正在生成/播放的旧回合，使用结构化 steering 元数据，
+    # 不再把“玩家刚刚改口……”之类的系统说明混进玩家原话。
+    steering: SteeringInput = Field(default_factory=SteeringInput)
 
     @field_validator("session_id", mode="before")
     @classmethod
@@ -77,6 +114,11 @@ class ChatRequest(BaseModel):
     def _clean_given_item(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
 
+    @field_validator("client_request_id", "supersedes_request_id", mode="before")
+    @classmethod
+    def _clean_client_request_id(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
     @model_validator(mode="after")
     def _normalize_limits(self) -> "ChatRequest":
         self.max_context_turns = max(0, min(int(self.max_context_turns), 50))
@@ -86,6 +128,82 @@ class ChatRequest(BaseModel):
         if self.time_min is not None:
             return int(self.time_min)
         return int(self.time)
+
+
+class GodotActionResultRequest(BaseModel):
+    """Godot 作为 Agent 工具执行器回传的一次动作结果。
+
+    这不是事件推送，也不是伪造的玩家消息。Godot 完成当前动作后只发起
+    一次请求，Server 将结果作为 tool result 交给 Mirdo Agent，再返回下一
+    个对白或动作步骤。这样后端不会在没有新事实时自行猜测世界状态。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    session_id: str = "default_session"
+    tool_call_id: str = ""
+    task_id: str = ""
+    chain_id: str = ""
+    step_id: str = ""
+    command: str = ""
+    target_ref: str = ""
+    event: str = "navigation_goal_finished"
+    status: str = "succeeded"
+    ok: bool = True
+    action_result: dict[str, Any] = Field(default_factory=dict)
+    observation: dict[str, Any] = Field(default_factory=dict)
+    source_decision: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    npc_stats: NpcStats = Field(default_factory=NpcStats)
+    day: int = 1
+    time: int = 0
+    time_min: int | None = None
+    given_item: str = ""
+    # 动作结果也只在请求明确要求时生成语音，避免后台无意触发引擎。
+    use_tts: bool = False
+    tts_voice_profile: str = "mirdo_ja"
+    # Godot 动作结果回合也可以临时切换音色，不需要修改存档配置。
+    tts_speaker_id: int | None = Field(default=None, ge=0)
+    generate_japanese: bool = False
+    provider: ProviderConfig | None = None
+    client_request_id: str = ""
+    client_sequence: int = Field(default=0, ge=0)
+    supersedes_request_id: str = ""
+
+    @field_validator(
+        "session_id",
+        "tool_call_id",
+        "task_id",
+        "chain_id",
+        "step_id",
+        "command",
+        "target_ref",
+        "event",
+        "status",
+        "given_item",
+        mode="before",
+    )
+    @classmethod
+    def _clean_protocol_text(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("session_id")
+    @classmethod
+    def _default_protocol_session(cls, value: str) -> str:
+        return value or "default_session"
+
+    @field_validator("action_result", "observation", "source_decision", "context", mode="before")
+    @classmethod
+    def _clean_protocol_dict(cls, value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+    @model_validator(mode="after")
+    def _normalize_protocol_result(self) -> "GodotActionResultRequest":
+        self.event = self.event or "navigation_goal_finished"
+        self.status = self.status or ("succeeded" if self.ok else "failed")
+        if self.time_min is None:
+            self.time_min = int(self.time)
+        return self
 
 
 class MemoryClearRequest(BaseModel):
@@ -139,19 +257,22 @@ class ExpeditionTimeInfo(BaseModel):
 class ExpeditionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    session_id: str = "outing_expedition"
+    # 与普通聊天共用默认时间线，这样未显式传 session_id 时，外出也能读到对话记忆。
+    session_id: str = "default_session"
     location: ExpeditionLocation
     loadout: list[ExpeditionLoadoutItem] = Field(default_factory=list)
     time: ExpeditionTimeInfo = Field(default_factory=ExpeditionTimeInfo)
     available_loot: dict[str, list[str]] = Field(default_factory=dict)
     unlocked_neighbors: list[str] = Field(default_factory=list)
+    # 外出是主角的行动；这里允许 Godot 传入额外的世界状态，但不会把它当成 Mirdo 对话。
+    context: dict[str, Any] = Field(default_factory=dict)
     provider: ProviderConfig | None = None
 
     @field_validator("session_id", mode="before")
     @classmethod
     def _clean_expedition_session_id(cls, value: Any) -> str:
         text = "" if value is None else str(value).strip()
-        return text or "outing_expedition"
+        return text or "default_session"
 
 
 class ExpeditionLootEntry(BaseModel):
@@ -163,11 +284,30 @@ class ExpeditionLootEntry(BaseModel):
     tag: str = "物资"
 
 
+class ExpeditionStoryMarker(BaseModel):
+    """一次外出留下的可追踪剧情标记。
+
+    ``continuity_key`` 用来把同一地点或同一线索串起来；``status`` 让 GM 知道
+    下次应该继续哪个未完事项，而不是重新随机一个完全不同的故事。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    continuity_key: str = ""
+    kind: str = "discovery"
+    summary: str = ""
+    location_id: str = ""
+    status: str = "active"
+    tags: list[str] = Field(default_factory=list)
+    next_hooks: list[str] = Field(default_factory=list)
+    importance: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
 class ExpeditionResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     ok: bool = True
-    session_id: str = "outing_expedition"
+    session_id: str = "default_session"
     turn_id: int = 0
     forked_from: str = ""
     forked_at_turn_id: int = 0
@@ -178,22 +318,111 @@ class ExpeditionResponse(BaseModel):
     risk_result: str = ""
     loot: list[ExpeditionLootEntry] = Field(default_factory=list)
     discovered_clues: list[str] = Field(default_factory=list)
+    # AI 对“这次故事以后怎么接着讲”的显式判断，供下一次 GM 回合使用。
+    search_focus: list[str] = Field(default_factory=list)
+    story_markers: list[ExpeditionStoryMarker] = Field(default_factory=list)
     mood: str = "冷静"
     health_damage: float = 0.0
     fallback: bool = False
     error: str = ""
 
 
+class ActionStep(BaseModel):
+    """动作线中的一个语义步骤。
+
+    Server 只规划步骤之间的因果关系；Godot 每次只执行 ``action_line`` 中的
+    ``current_step_id``，完成后把结果连同剩余动作线回传，避免一次响应塞入多个
+    同时执行的动作。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    step_id: str = ""
+    action: str = ""
+    command: str = ""
+    command_payload: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    expected_result: str = ""
+    success_next_step: str = ""
+    failure_next_step: str = ""
+    wait_for_result: bool = True
+    status: str = "pending"
+
+    @field_validator(
+        "step_id",
+        "action",
+        "command",
+        "reason",
+        "expected_result",
+        "success_next_step",
+        "failure_next_step",
+        "status",
+        mode="before",
+    )
+    @classmethod
+    def _clean_step_text(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("command_payload", mode="before")
+    @classmethod
+    def _clean_step_payload(cls, value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+
+class TaskControl(BaseModel):
+    """Agent 对“当前任务”和新输入之间关系的明确判断。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["none", "continue", "pause", "replace", "cancel"] = "none"
+    reason: str = ""
+    resume_after_reply: bool = True
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _clean_task_control_reason(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+
+class TTSOutput(BaseModel):
+    """一次聊天是否请求并成功生成了语音。音频通过 URL 获取，不塞进 JSON。"""
+
+    requested: bool = False
+    generated: bool = False
+    provider: str = ""
+    voice_profile: str = "mirdo_ja"
+    text_source: str = "dialogue"
+    audio_url: str = ""
+    cache_key: str = ""
+    cache_hit: bool = False
+    error: str = ""
+
+
 class ChatResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    """Mirdo 本回合的动作线和对白，也是 Godot 的唯一响应契约。
+
+    ``action_line`` 可以包含多个有因果关系的步骤，但只有首个 pending 步骤会
+    被 Godot 执行；其余步骤等待真实观察结果后再决定是否继续。
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     ok: bool = True
     dialogue: str
+    # Agent 的中文主对白；只有请求 generate_japanese=true 时才填充此字段。
+    dialogue_ja: str = ""
     emotion: str = "平静"
     expression: str = ""
     action: str = "Idle"
-    command: str = ""
-    command_payload: dict[str, Any] = Field(default_factory=dict)
+    action_line: list[ActionStep] = Field(default_factory=list)
+    # 类似 Codex 的任务引导：普通插话继续原任务，临时问题暂停后恢复，
+    # 新指令替换任务，明确停止则取消任务。
+    task_control: TaskControl = Field(default_factory=TaskControl)
+    current_step_id: str = ""
+    task_id: str = ""
+    task_status: str = ""
+    task_reason: str = ""
+    next_decision_hint: str = ""
     visemes: str = ""
     viseme_sequence: str = ""
     stat_change: NpcStats = Field(default_factory=NpcStats)
@@ -204,6 +433,18 @@ class ChatResponse(BaseModel):
     forked_at_turn_id: int = 0
     used_knowledge: list[dict[str, Any]] = Field(default_factory=list)
     used_memory: list[dict[str, Any]] = Field(default_factory=list)
+    used_story_events: list[dict[str, Any]] = Field(default_factory=list)
     memory_updates: list[dict[str, Any]] = Field(default_factory=list)
+    story_events: list[dict[str, Any]] = Field(default_factory=list)
+    # ``godot_tool_result`` 表示这次回复是对动作工具结果的直接响应。
+    response_kind: str = "chat"
+    client_request_id: str = ""
+    client_sequence: int = 0
+    superseded: bool = False
+    # 服务端回显本回合实际接收的引导目标，方便 Godot 调试队列归属。
+    steering_ack: dict[str, Any] = Field(default_factory=dict)
+    tool_call_id: str = ""
+    tool_result_ack: dict[str, Any] = Field(default_factory=dict)
     fallback: bool = False
     error: str = ""
+    tts: TTSOutput = Field(default_factory=TTSOutput)

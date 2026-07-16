@@ -11,6 +11,13 @@ def test_memory_extractor_reads_player_name_and_preferences():
     assert {"subject": "player", "predicate": "dislikes", "value": "苦咖啡", "confidence": 0.82} in facts
 
 
+def test_memory_extractor_reads_explicit_expedition_target():
+    facts = MemoryExtractor().extract("这次外出我想找绷带，最好再拿一瓶水。")
+
+    assert {"subject": "player", "predicate": "wants", "value": "绷带", "confidence": 0.78} in facts
+    assert {"subject": "player", "predicate": "wants", "value": "一瓶水", "confidence": 0.78} in facts
+
+
 def test_memory_extractor_normalizes_model_memory_updates():
     extractor = MemoryExtractor()
 

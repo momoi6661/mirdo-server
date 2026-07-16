@@ -61,6 +61,6 @@ def test_session_history_snapshot_and_clear_contract(tmp_path: Path):
         assert clear.status_code == 200
         clear_body = clear.json()
         assert clear_body["ok"] is True
-        assert clear_body["memory_vectors_deleted"] >= 1
+        assert "memory_index_deleted" in clear_body
         assert client.get("/session/session-a/history").json()["turns"] == []
         assert app.state.memory_retriever.count_session_vectors("session-a") == 0

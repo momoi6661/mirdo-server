@@ -10,7 +10,7 @@ def test_health_contract():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["service"] == "server"
+    assert body["service"] == "mirdo-server"
     assert body["version"] == "0.1.0"
     assert "llm_ready" in body
     assert "rag_ready" in body

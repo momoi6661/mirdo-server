@@ -1,1 +1,0 @@
-invalid type: string "## Dialogue Examples\n\nPlayer: 去看看食物柜\nResponse:\n{\"dialogue\":\"好呀老师，我去看看食物还剩多少。\",\"emotion\":\"认真\",\"expression\":\"neutral\",\"action\":\"work_count_supplies\",\"command\":\"go_to_object\",\"command_payload\":{\"target_object\":\"food_cabinet\",\"marker_role\":\"approach\"},\"visemes\":\"aa、ih、ou\",\"stat_change\":{},

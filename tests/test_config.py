@@ -14,11 +14,12 @@ def test_settings_defaults_use_local_runtime_paths(monkeypatch):
 
     assert settings.app_host == "127.0.0.1"
     assert settings.app_port == 5678
-    assert settings.service_name == "server"
+    assert settings.service_name == "mirdo-server"
     assert settings.runtime_dir == Path("data/runtime")
     assert settings.conversation_db == Path("data/runtime/conversations.sqlite3")
-    assert settings.chroma_dir == Path("data/runtime/chroma")
+    assert settings.rag_db == Path("data/runtime/rag.sqlite3")
     assert settings.knowledge_dir == Path("data/knowledge")
+    assert settings.chat_max_tokens == 0
 
 
 def test_settings_llm_ready_requires_base_url_key_and_model():

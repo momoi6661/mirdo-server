@@ -22,7 +22,7 @@ def test_rag_status_and_clear_routes(tmp_path: Path):
     with TestClient(app) as client:
         before = client.get("/rag/status")
         assert before.status_code == 200
-        assert before.json()["ready"] is False
+        assert before.json()["ready"] is True
 
         ingest = client.post("/ingest", json={"clear_first": True})
         assert ingest.status_code == 200

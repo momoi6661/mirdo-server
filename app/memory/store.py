@@ -40,6 +40,8 @@ class MemoryFact:
     active: bool
     created_at: str
     updated_at: str
+    kind: str = "fact"
+    importance: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +55,35 @@ class MemoryFact:
             "active": self.active,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "kind": self.kind,
+            "importance": self.importance,
+        }
+
+
+@dataclass(frozen=True)
+class NavigationTask:
+    """一个等待 Godot 真实导航结果的短任务，不混入长期记忆。"""
+
+    task_id: str
+    session_id: str
+    goal: str
+    command: str
+    target_ref: str
+    status: str
+    last_event: str
+    last_result: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "goal": self.goal,
+            "command": self.command,
+            "target_ref": self.target_ref,
+            "status": self.status,
+            "last_event": self.last_event,
+            "last_result": self.last_result,
         }
 
 
@@ -97,6 +128,8 @@ class MemoryStore:
                     confidence real not null default 0.7,
                     source_turn_id integer not null default 0,
                     active integer not null default 1,
+                    kind text not null default 'fact',
+                    importance real not null default 0.5,
                     created_at text not null,
                     updated_at text not null,
                     unique(session_id, subject, predicate, value),
@@ -106,15 +139,61 @@ class MemoryStore:
                 create index if not exists idx_memory_facts_session_active
                     on memory_facts(session_id, active);
 
-                create table if not exists memory_embeddings (
-                    memory_fact_id integer primary key,
-                    chroma_id text not null unique,
-                    collection text not null default 'session_memory',
-                    updated_at text not null,
-                    foreign key(memory_fact_id) references memory_facts(id) on delete cascade
+                create virtual table if not exists memory_fts using fts5(
+                    subject, predicate, value, session_id unindexed, content='memory_facts', content_rowid='id'
                 );
+                create trigger if not exists memory_ai after insert on memory_facts begin
+                    insert into memory_fts(rowid,subject,predicate,value,session_id) values(new.id,new.subject,new.predicate,new.value,new.session_id);
+                end;
+                create trigger if not exists memory_au after update on memory_facts begin
+                    insert into memory_fts(memory_fts,rowid,subject,predicate,value,session_id) values('delete',old.id,old.subject,old.predicate,old.value,old.session_id);
+                    insert into memory_fts(rowid,subject,predicate,value,session_id) values(new.id,new.subject,new.predicate,new.value,new.session_id);
+                end;
+                create trigger if not exists memory_ad after delete on memory_facts begin
+                    insert into memory_fts(memory_fts,rowid,subject,predicate,value,session_id) values('delete',old.id,old.subject,old.predicate,old.value,old.session_id);
+                end;
+
+                create table if not exists story_events (
+                    id integer primary key autoincrement,
+                    session_id text not null,
+                    kind text not null,
+                    summary text not null,
+                    importance real not null default 0.5,
+                    source_turn_id integer not null default 0,
+                    metadata_json text not null default '{}',
+                    created_at text not null,
+                    foreign key(session_id) references sessions(session_id) on delete cascade
+                );
+                create index if not exists idx_story_events_session_id_id on story_events(session_id, id desc);
+
+                create table if not exists navigation_tasks (
+                    task_id text primary key,
+                    session_id text not null,
+                    goal text not null,
+                    command text not null,
+                    target_ref text not null,
+                    status text not null check(status in ('waiting', 'succeeded', 'failed', 'cancelled')),
+                    last_event text not null default '',
+                    last_result_json text not null default '{}',
+                    created_at text not null,
+                    updated_at text not null,
+                    foreign key(session_id) references sessions(session_id) on delete cascade
+                );
+                create index if not exists idx_navigation_tasks_session_updated
+                    on navigation_tasks(session_id, updated_at desc);
                 """
             )
+            # 老存档没有新字段时原地升级，不影响已有对话与事实。
+            columns = {row[1] for row in conn.execute("pragma table_info(memory_facts)")}
+            if "kind" not in columns:
+                conn.execute("alter table memory_facts add column kind text not null default 'fact'")
+            if "importance" not in columns:
+                conn.execute("alter table memory_facts add column importance real not null default 0.5")
+            story_columns = {row[1] for row in conn.execute("pragma table_info(story_events)")}
+            if "metadata_json" not in story_columns:
+                conn.execute("alter table story_events add column metadata_json text not null default '{}'")
+            # Triggers only cover writes after migration; idempotently backfill old facts.
+            conn.execute("insert into memory_fts(rowid,subject,predicate,value,session_id) select id,subject,predicate,value,session_id from memory_facts where id not in (select rowid from memory_fts)")
 
     def health(self) -> bool:
         try:
@@ -173,6 +252,37 @@ class MemoryStore:
             ).fetchall()
         return [self._turn_from_row(row) for row in rows]
 
+    def get_session_summary(self, session_id: str) -> tuple[str, int]:
+        """返回已压缩的旧对话及其覆盖到的最后一个 turn id。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "select summary, summary_turn_id from sessions where session_id = ?",
+                (self._clean_session_id(session_id),),
+            ).fetchone()
+        return ("", 0) if row is None else (str(row["summary"]), int(row["summary_turn_id"]))
+
+    def get_turns_after(self, session_id: str, turn_id: int, limit: int = 24) -> list[Turn]:
+        """读取尚未压缩到摘要中的连续对话，供摘要 Agent 使用。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select * from turns where session_id = ? and id > ? order by id asc limit ?",
+                (self._clean_session_id(session_id), max(0, int(turn_id)), max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [self._turn_from_row(row) for row in rows]
+
+    def update_session_summary(self, session_id: str, summary: str, summary_turn_id: int) -> None:
+        """原子替换会话摘要；原始 turns 保留，摘要只用于节省上下文窗口。"""
+        clean_summary = str(summary or "").strip()[:2000]
+        if not clean_summary:
+            return
+        now = self._now()
+        with self._connect() as conn:
+            self._ensure_session(conn, self._clean_session_id(session_id), now)
+            conn.execute(
+                "update sessions set summary = ?, summary_turn_id = ?, updated_at = ? where session_id = ?",
+                (clean_summary, max(0, int(summary_turn_id)), now, self._clean_session_id(session_id)),
+            )
+
     def upsert_memory_fact(
         self,
         session_id: str,
@@ -181,6 +291,8 @@ class MemoryStore:
         value: str,
         confidence: float = 0.7,
         source_turn_id: int = 0,
+        kind: str = "fact",
+        importance: float = 0.5,
     ) -> MemoryFact:
         clean_session = self._clean_session_id(session_id)
         clean_subject = str(subject or "").strip() or "unknown"
@@ -189,20 +301,36 @@ class MemoryStore:
         if not clean_value:
             raise ValueError("memory fact value must not be empty")
         safe_confidence = max(0.0, min(float(confidence), 1.0))
+        clean_kind = str(kind or "fact").strip().lower()[:32] or "fact"
+        safe_importance = max(0.0, min(float(importance), 1.0))
         now = self._now()
 
         with self._connect() as conn:
             self._ensure_session(conn, clean_session, now)
+            # 新名字会取代旧名字；同一物品的喜欢/不喜欢互斥，保留旧记录但标为 inactive。
+            if clean_predicate == "name":
+                conn.execute(
+                    "update memory_facts set active = 0, updated_at = ? where session_id = ? and subject = ? and predicate = 'name' and value <> ? and active = 1",
+                    (now, clean_session, clean_subject, clean_value),
+                )
+            elif clean_predicate in {"likes", "dislikes"}:
+                opposite = "dislikes" if clean_predicate == "likes" else "likes"
+                conn.execute(
+                    "update memory_facts set active = 0, updated_at = ? where session_id = ? and subject = ? and predicate = ? and value = ? and active = 1",
+                    (now, clean_session, clean_subject, opposite, clean_value),
+                )
             conn.execute(
                 """
                 insert into memory_facts(
                     session_id, subject, predicate, value, confidence,
-                    source_turn_id, active, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    source_turn_id, active, kind, importance, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 on conflict(session_id, subject, predicate, value)
                 do update set
                     confidence = excluded.confidence,
                     source_turn_id = excluded.source_turn_id,
+                    kind = excluded.kind,
+                    importance = excluded.importance,
                     active = 1,
                     updated_at = excluded.updated_at
                 """,
@@ -213,6 +341,8 @@ class MemoryStore:
                     clean_value,
                     safe_confidence,
                     int(source_turn_id),
+                    clean_kind,
+                    safe_importance,
                     now,
                     now,
                 ),
@@ -242,6 +372,173 @@ class MemoryStore:
                 (clean_session, safe_limit),
             ).fetchall()
         return [self._fact_from_row(row) for row in rows]
+
+    def create_navigation_task(
+        self,
+        session_id: str,
+        *,
+        task_id: str,
+        goal: str,
+        command: str,
+        target_ref: str,
+    ) -> NavigationTask:
+        """保存一条等待 Godot 导航结果的任务；新动作会取代同存档未完成的旧动作。"""
+        clean_session = self._clean_session_id(session_id)
+        clean_task_id = str(task_id or "").strip()
+        clean_command = str(command or "").strip()
+        clean_target = str(target_ref or "").strip()
+        if not clean_task_id or not clean_command or not clean_target:
+            raise ValueError("navigation task requires task_id, command and target_ref")
+        now = self._now()
+        with self._connect() as conn:
+            self._ensure_session(conn, clean_session, now)
+            conn.execute(
+                "update navigation_tasks set status = 'cancelled', updated_at = ? where session_id = ? and status = 'waiting'",
+                (now, clean_session),
+            )
+            conn.execute(
+                """
+                insert into navigation_tasks(
+                    task_id, session_id, goal, command, target_ref, status,
+                    last_event, last_result_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, 'waiting', '', '{}', ?, ?)
+                """,
+                (clean_task_id, clean_session, str(goal or "").strip()[:500], clean_command, clean_target, now, now),
+            )
+            row = conn.execute("select * from navigation_tasks where task_id = ?", (clean_task_id,)).fetchone()
+        return self._task_from_row(row)
+
+    def record_navigation_task_result(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        event: str,
+        ok: bool,
+        target_ref: str,
+    ) -> NavigationTask | None:
+        """以 Godot 回传的结果结束匹配的导航任务，模型文字不能改变这个结论。"""
+        clean_session = self._clean_session_id(session_id)
+        clean_task_id = str(task_id or "").strip()
+        if not clean_task_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from navigation_tasks where session_id = ? and task_id = ?",
+                (clean_session, clean_task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            task = self._task_from_row(row)
+            actual_target = str(target_ref or "").strip()
+            if task.status != "waiting" or (actual_target and actual_target != task.target_ref):
+                return task
+            clean_event = str(event or "").strip()
+            # 现在任务表同时记录导航、取物和玩家接受等 Godot 任务；成功与否以
+            # Godot 的布尔结果为准，而不是把事件名硬编码成某一种导航事件。
+            status = "succeeded" if bool(ok) else "failed"
+            now = self._now()
+            result = {"ok": bool(ok), "target_ref": actual_target or task.target_ref}
+            conn.execute(
+                """
+                update navigation_tasks
+                set status = ?, last_event = ?, last_result_json = ?, updated_at = ?
+                where task_id = ?
+                """,
+                (status, clean_event, self._json_dumps(result), now, clean_task_id),
+            )
+            updated = conn.execute("select * from navigation_tasks where task_id = ?", (clean_task_id,)).fetchone()
+        return self._task_from_row(updated)
+
+    def add_story_event(
+        self,
+        session_id: str,
+        kind: str,
+        summary: str,
+        *,
+        importance: float = 0.5,
+        source_turn_id: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """记录可供后续 GM 接续的剧情事件，避免与玩家偏好混淆。"""
+        clean_session = self._clean_session_id(session_id)
+        clean_summary = str(summary or "").strip()
+        if not clean_summary:
+            raise ValueError("story event summary must not be empty")
+        now = self._now()
+        with self._connect() as conn:
+            self._ensure_session(conn, clean_session, now)
+            cursor = conn.execute(
+                "insert into story_events(session_id, kind, summary, importance, source_turn_id, metadata_json, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    clean_session,
+                    str(kind or "event").strip()[:32] or "event",
+                    clean_summary[:500],
+                    max(0.0, min(float(importance), 1.0)),
+                    int(source_turn_id),
+                    self._json_dumps(metadata or {}),
+                    now,
+                ),
+            )
+            row = conn.execute("select * from story_events where id = ?", (cursor.lastrowid,)).fetchone()
+        return dict(row)
+
+    def get_story_events(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select * from story_events where session_id = ? order by id desc limit ?",
+                (self._clean_session_id(session_id), max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [self._story_event_to_dict(row) for row in rows]
+
+    def supersede_story_events(
+        self,
+        session_id: str,
+        continuity_key: str,
+        *,
+        status: str = "superseded",
+    ) -> int:
+        """关闭同一 continuity_key 的旧 active 标记，保留历史但避免下次重复续写。"""
+        clean_session = self._clean_session_id(session_id)
+        clean_key = str(continuity_key or "").strip()
+        if not clean_key:
+            return 0
+        changed = 0
+        now = self._now()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select id, metadata_json from story_events where session_id = ?",
+                (clean_session,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(str(row["metadata_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                if not isinstance(metadata, dict) or metadata.get("continuity_key") != clean_key:
+                    continue
+                if str(metadata.get("status", "active")) in {"resolved", "closed", "superseded"}:
+                    continue
+                metadata["status"] = str(status or "superseded")[:24]
+                conn.execute(
+                    "update story_events set metadata_json = ? where id = ?",
+                    (self._json_dumps(metadata), int(row["id"])),
+                )
+                changed += 1
+            if changed:
+                conn.execute("update sessions set updated_at = ? where session_id = ?", (now, clean_session))
+        return changed
+
+    def _story_event_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        """把 SQLite 的 JSON 元数据还原为字典，旧存档没有该字段也能读取。"""
+        result = dict(row)
+        raw = result.get("metadata_json", "{}")
+        try:
+            metadata = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        result["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return result
 
     def get_memory_facts_by_ids(self, session_id: str, fact_ids: list[int] | set[int] | tuple[int, ...]) -> list[MemoryFact]:
         clean_session = self._clean_session_id(session_id)
@@ -367,6 +664,7 @@ class MemoryStore:
         now = self._now()
         copied_turns = 0
         copied_facts = 0
+        copied_story_events = 0
         with self._connect() as conn:
             self._ensure_session(conn, target_session, now)
             turn_rows = conn.execute(
@@ -404,12 +702,14 @@ class MemoryStore:
                     """
                     insert into memory_facts(
                         session_id, subject, predicate, value, confidence,
-                        source_turn_id, active, created_at, updated_at
-                    ) values (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        source_turn_id, active, kind, importance, created_at, updated_at
+                    ) values (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                     on conflict(session_id, subject, predicate, value)
                     do update set
                         confidence = excluded.confidence,
                         source_turn_id = excluded.source_turn_id,
+                        kind = excluded.kind,
+                        importance = excluded.importance,
                         active = 1,
                         updated_at = excluded.updated_at
                     """,
@@ -420,11 +720,40 @@ class MemoryStore:
                         str(row["value"]),
                         float(row["confidence"]),
                         mapped_turn_id,
+                        str(row["kind"]),
+                        float(row["importance"]),
                         str(row["created_at"]),
                         str(row["updated_at"]),
                     ),
                 )
                 copied_facts += 1
+            event_rows = conn.execute(
+                """
+                select * from story_events
+                where session_id = ? and (source_turn_id = 0 or source_turn_id <= ?)
+                order by id asc
+                """,
+                (source_session, safe_checkpoint),
+            ).fetchall()
+            for row in event_rows:
+                source_turn_id = int(row["source_turn_id"])
+                mapped_turn_id = int(turn_id_map.get(source_turn_id, 0 if source_turn_id <= 0 else source_turn_id))
+                conn.execute(
+                    """
+                    insert into story_events(session_id, kind, summary, importance, source_turn_id, metadata_json, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_session,
+                        str(row["kind"]),
+                        str(row["summary"]),
+                        float(row["importance"]),
+                        mapped_turn_id,
+                        str(row["metadata_json"] or "{}") if "metadata_json" in row.keys() else "{}",
+                        str(row["created_at"]),
+                    ),
+                )
+                copied_story_events += 1
             conn.execute(
                 "update sessions set updated_at = ? where session_id = ?",
                 (now, target_session),
@@ -436,6 +765,7 @@ class MemoryStore:
             "checkpoint_turn_id": safe_checkpoint,
             "turns_copied": copied_turns,
             "facts_copied": copied_facts,
+            "story_events_copied": copied_story_events,
         }
 
     def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -498,10 +828,6 @@ class MemoryStore:
                     (now, clean_session, safe_fact_id),
                 )
                 conn.execute(
-                    "delete from memory_embeddings where memory_fact_id = ?",
-                    (safe_fact_id,),
-                )
-                conn.execute(
                     "update sessions set updated_at = ? where session_id = ?",
                     (now, clean_session),
                 )
@@ -536,6 +862,7 @@ class MemoryStore:
             "summary_turn_id": 0 if session is None else int(session["summary_turn_id"]),
             "recent_turns": [turn.to_dict() for turn in self.get_recent_turns(clean_session, recent_limit)],
             "memory_facts": [fact.to_dict() for fact in self.get_memory_facts(clean_session)],
+            "story_events": self.get_story_events(clean_session, recent_limit),
         }
 
     def clear_session(self, session_id: str) -> dict[str, Any]:
@@ -549,6 +876,10 @@ class MemoryStore:
                 "delete from memory_facts where session_id = ?",
                 (clean_session,),
             ).rowcount
+            events_deleted = conn.execute(
+                "delete from story_events where session_id = ?",
+                (clean_session,),
+            ).rowcount
             conn.execute(
                 "delete from sessions where session_id = ?",
                 (clean_session,),
@@ -558,18 +889,21 @@ class MemoryStore:
             "session_id": clean_session,
             "turns_deleted": max(0, int(turns_deleted)),
             "facts_deleted": max(0, int(facts_deleted)),
+            "story_events_deleted": max(0, int(events_deleted)),
         }
 
     def clear_all(self) -> dict[str, Any]:
         with self._connect() as conn:
             turns_deleted = conn.execute("delete from turns").rowcount
             facts_deleted = conn.execute("delete from memory_facts").rowcount
+            events_deleted = conn.execute("delete from story_events").rowcount
             conn.execute("delete from sessions")
         return {
             "ok": True,
             "clear_all": True,
             "turns_deleted": max(0, int(turns_deleted)),
             "facts_deleted": max(0, int(facts_deleted)),
+            "story_events_deleted": max(0, int(events_deleted)),
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -645,6 +979,20 @@ class MemoryStore:
             created_at=str(row["created_at"]),
         )
 
+    def _task_from_row(self, row: sqlite3.Row) -> NavigationTask:
+        return NavigationTask(
+            task_id=str(row["task_id"]),
+            session_id=str(row["session_id"]),
+            goal=str(row["goal"]),
+            command=str(row["command"]),
+            target_ref=str(row["target_ref"]),
+            status=str(row["status"]),
+            last_event=str(row["last_event"]),
+            last_result=self._json_loads(str(row["last_result_json"])),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
     @staticmethod
     def _fact_from_row(row: sqlite3.Row) -> MemoryFact:
         return MemoryFact(
@@ -658,4 +1006,6 @@ class MemoryStore:
             active=bool(row["active"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            kind=str(row["kind"]),
+            importance=float(row["importance"]),
         )

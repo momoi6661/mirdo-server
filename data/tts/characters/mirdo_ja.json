@@ -1,0 +1,90 @@
+{
+  "profile_id": "mirdo_ja",
+  "character_id": "mirdo",
+  "display_name": "Mirdo",
+  "locale": "ja-JP",
+  "dialogue_locale": "ja_jp",
+  "provider": "voicevox",
+  "speaker_id": 20,
+  "default_emotion": "平静",
+  "emotion_presets": {
+    "平静": {
+      "speed_scale": 0.95,
+      "pitch_scale": 0.015,
+      "intonation_scale": 1.02,
+      "volume_scale": 1.0,
+      "pre_phoneme_length": 0.08,
+      "post_phoneme_length": 0.1
+    },
+    "温柔": {
+      "speed_scale": 0.92,
+      "pitch_scale": 0.025,
+      "intonation_scale": 0.94,
+      "volume_scale": 0.98,
+      "pre_phoneme_length": 0.1,
+      "post_phoneme_length": 0.12
+    },
+    "开心": {
+      "speed_scale": 1.03,
+      "pitch_scale": 0.045,
+      "intonation_scale": 1.12,
+      "volume_scale": 1.02,
+      "pre_phoneme_length": 0.06,
+      "post_phoneme_length": 0.08
+    },
+    "害羞": {
+      "speed_scale": 0.9,
+      "pitch_scale": 0.035,
+      "intonation_scale": 0.88,
+      "volume_scale": 0.96,
+      "pre_phoneme_length": 0.12,
+      "post_phoneme_length": 0.14
+    },
+    "惊讶": {
+      "speed_scale": 1.06,
+      "pitch_scale": 0.075,
+      "intonation_scale": 1.22,
+      "volume_scale": 1.03,
+      "pre_phoneme_length": 0.04,
+      "post_phoneme_length": 0.06
+    },
+    "担心": {
+      "speed_scale": 0.96,
+      "pitch_scale": -0.015,
+      "intonation_scale": 1.08,
+      "volume_scale": 0.98,
+      "pre_phoneme_length": 0.09,
+      "post_phoneme_length": 0.11
+    },
+    "疲惫": {
+      "speed_scale": 0.84,
+      "pitch_scale": -0.035,
+      "intonation_scale": 0.78,
+      "volume_scale": 0.92,
+      "pre_phoneme_length": 0.14,
+      "post_phoneme_length": 0.16
+    },
+    "生气": {
+      "speed_scale": 1.02,
+      "pitch_scale": 0.025,
+      "intonation_scale": 1.18,
+      "volume_scale": 1.04,
+      "pre_phoneme_length": 0.04,
+      "post_phoneme_length": 0.06
+    }
+  },
+  "aliases": {
+    "平和": "平静",
+    "neutral": "平静",
+    "calm": "平静",
+    "soft": "温柔",
+    "happy": "开心",
+    "joy": "开心",
+    "shy": "害羞",
+    "surprised": "惊讶",
+    "worried": "担心",
+    "sad": "疲惫",
+    "tired": "疲惫",
+    "angry": "生气"
+  }
+}

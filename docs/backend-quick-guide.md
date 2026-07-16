@@ -27,14 +27,11 @@ Godot：高频动作执行、本地自主 AI、输入聚合、动画/表情/字�
 |---|---|---|
 | Web API | FastAPI | 提供 `/chat`、`/outing/resolve`、`/ingest`、记忆管理等接口 |
 | 数据模型 | Pydantic v2 | 请求/响应校验、字段清洗、默认值 |
-| 模型调用 | `httpx` | 直接请求 OpenAI-compatible `/chat/completions` |
+| 模型调用 | PydanticAI | Agent、tools、结构化 output 和 OpenAI-compatible 模型适配 |
 | LLM 兼容 | OpenAI-compatible API | 支持 DeepSeek、NVIDIA、OpenAI 兼容服务等 |
-| RAG 向量库 | ChromaDB | 世界知识和长期记忆向量检索 |
-| Embedding | fastembed | 本地 ONNX embedding |
-| 默认 embedding | `BAAI/bge-small-zh-v1.5` | 中文检索效果较好，体积小，适合本地 |
-| 备用 embedding | `LocalHashEmbeddings` | 无模型/测试时的确定性 hash embedding |
+| RAG 知识库 | SQLite FTS5 | 世界知识全文检索；不再依赖 Chroma |
 | 数据库 | SQLite | 保存 session、turn、memory_facts |
-| 文档切块 | LangChain TextSplitter | 知识库 ingest 切 chunk |
+| 文档切块 | 内置 Markdown loader | 知识库 ingest 切 chunk |
 | 测试 | pytest | 后端单元测试和回归测试 |
 
 依赖在：
@@ -55,6 +52,7 @@ D:\AAgodot\Server
 │  ├─ schemas.py                 # Pydantic 请求/响应模型
 │  ├─ llm_provider.py            # 模型配置解析、Godot AISettings 读取、HTTP 模型调用
 │  ├─ chat_orchestrator.py       # 普通 Mirdo 对话主流程
+│  ├─ expedition_agent.py        # 独立 GM Agent（主角外出故事）
 │  ├─ expedition_orchestrator.py # 外出故事生成主流程
 │  ├─ prompt_builder.py          # 普通对话 prompt 构建
 │  ├─ response_parser.py         # 模型 JSON 输出解析
@@ -153,7 +151,8 @@ POST /chat
 POST /outing/resolve
 ```
 
-外出故事生成接口。用于外出地图结算。
+外出故事生成接口。这里使用独立的 GM Agent，叙述主角的探索，不使用 Mirdo 的 NPC Agent。
+GM 会读取同一 session 的近期对话、明确的 `wants` 目标和已保存的故事标记。
 
 输出包含：
 
@@ -164,6 +163,8 @@ POST /outing/resolve
 - `risk_result`
 - `loot`
 - `discovered_clues`
+- `search_focus`
+- `story_markers`（带 `continuity_key`、`status`、`next_hooks`）
 - `health_damage`
 
 ### 4.5 RAG 管理
@@ -1251,3 +1252,137 @@ Godot 行为层规则：
 - `CharacterAIActionExecutor` 会把 `chain_id/chain_depth` 带到导航完成 report。
 - 到达下一个目标后会再次触发 `external_goal_follow_up`。
 - Godot 端只提供 `external_goal_follow_up_soft_chain_depth` 作为软收束提示；不再因为达到某个深度就硬截断。极端循环仍应通过“不要重复同一目标”、冷却和 external grace 兜底处理。
+
+## 21. 任务链状态与场景摘要（Godot ↔ 后端）
+
+### 21.1 为什么新增 task_status
+
+Mirdo 做完“去看看/检查/拿东西”这类任务后，不能只停在目标点，也不能马上被本地自动行为抢走。现在后端响应可以带：
+
+```json
+{
+  "task_status": "continue|complete|wait|cancel",
+  "task_reason": "一句话说明为什么继续或结束",
+  "next_decision_hint": "给下一次到达回调的提示，可为空"
+}
+```
+
+含义：
+
+- `continue`：还有后续任务，Godot 保持任务链锁，等待命令执行或下一次到达回调。
+- `complete`：当前任务链自然结束，Godot 释放锁，Mirdo 可以恢复本地自主行为。
+- `wait`：暂时等待老师/场景变化，不主动继续。
+- `cancel`：任务取消，释放锁。
+
+如果模型忘写 `task_status`，`BehaviorPlanner` 会根据是否有 command 自动补：有 command 默认 `continue`，无 command 默认 `complete`。
+
+### 21.2 Godot 的任务链锁
+
+Godot 端 `CharacterAutonomousLifeComponent` 会读取后端返回的 `task_status`、`command_payload.chain_id`、`chain_depth`：
+
+```text
+AI command / chain_id / task_status=continue
+→ ai_task_chain_active=true
+→ 本地随机巡游、自言自语和普通自主决策暂停
+→ 到达目标后触发 external_goal_follow_up
+→ 后端再判断 continue/complete/wait/cancel
+```
+
+这样“去厕所看看镜子里有什么”会变成：
+
+```text
+老师请求
+→ 后端决定去 bathroom_mirror_look
+→ Godot 导航和播放动作
+→ 到达后 Godot 主动发 observation
+→ 后端反馈镜子情况，并判断是否继续检查别处
+→ 如果 complete，Godot 释放任务链
+```
+
+### 21.3 场景摘要 world_scene
+
+Godot 每次 `/chat` 请求除了当前 `perception` 和 `known_nav_points`，还会传：
+
+```json
+{
+  "context": {
+    "world_scene": {
+      "source": "godot_runtime_scene",
+      "scene_name": "...",
+      "world_objects": [
+        {"id":"food_cabinet_runtime","name":"食物柜","description":"...","tags":["food","water"]}
+      ],
+      "world_areas": []
+    }
+  }
+}
+```
+
+用途：
+
+- `perception`：Mirdo 当前看见/附近感知。
+- `known_nav_points`：全局语义导航小球，用来移动。
+- `world_scene`：当前 Godot 场景里注册的 AI 语义物体/区域，用来回答“柜子里面有什么”“这里有哪些设施”等问题。
+
+后端 `PromptBuilder` 会把 `world_scene` 格式化进 runtime context。注意它是运行时场景事实，优先级高于静态知识库，但仍不能覆盖系统规则。
+
+### 21.4 连续对话策略
+
+当前采用“前端聚合 + 后端兜底理解”：
+
+1. Godot 对玩家短时间连续输入做 typing gate 聚合。
+2. 如果 AI 正在请求，玩家后续输入进入队列，并尽量合并为 ordered messages。
+3. 后端看到 `第1句/随后/继续` 会按时间顺序理解最终意图，不逐句机械回答。
+4. 如果后续句出现“先别、等等、不对、改成、不要、先陪”等修正信号，后端动作规划优先采用后续句。
+
+这样玩家可以自然地说：
+
+```text
+去看看食物柜
+等等，先别去
+门口好像有声音，先去入口看一下
+```
+
+后端会把它理解成最终目标是“入口”，而不是同时执行两个互相冲突的命令。
+
+## 22. Mirdo 连续说话（dialogue_follow_up）
+
+连续对话不只指玩家连续输入，也包括 Mirdo 自己的连续表达。现在约定：如果后端判断 Mirdo 一句话还没自然说完，就返回：
+
+```json
+{
+  "dialogue": "老师，我先看一下食物柜。",
+  "task_status": "continue",
+  "task_reason": "还有后续说明没说完。",
+  "next_decision_hint": "继续说明食物和水是否足够。",
+  "command": ""
+}
+```
+
+Godot 收到 `task_status=continue` 且没有移动/交互 command 时，会自动发起一次 autonomous 续说请求：
+
+```json
+{
+  "context": {
+    "request_source": "autonomous",
+    "source_decision": {
+      "kind": "dialogue_follow_up",
+      "event": "dialogue_continue",
+      "last_dialogue": "老师，我先看一下食物柜。",
+      "next_decision_hint": "继续说明食物和水是否足够。",
+      "chain_id": "dialogue:...",
+      "chain_depth": 1
+    }
+  }
+}
+```
+
+后端规则：
+
+1. 把 `dialogue_follow_up` 当成 Mirdo 自己接着说，不是玩家新输入。
+2. 接续时不要重复上一句。
+3. 如果这次说完整，返回 `task_status=complete`。
+4. 如果还需要继续，再返回 `task_status=continue` 和新的 `next_decision_hint`。
+5. 默认不要输出移动 command，除非这段续说自然引出一个明确新动作。
+
+Godot 有 `auto_continue_dialogue_max_depth` 防止极端循环；正常结束应由后端/模型通过 `task_status=complete` 决定。

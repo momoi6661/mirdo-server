@@ -7,7 +7,7 @@
 - 启动入口：`run_server.py`
 - FastAPI 应用：`app/main.py`
 - 默认地址：`http://127.0.0.1:5678`
-- Godot 自动拉起后端当前关闭：`D:\AAgodot\FPS\ai\AIServiceSupervisor.gd` 中 `auto_start_enabled = false`
+- Godot 运行项目（包括编辑器内运行和导出游戏）会自动检查并拉起后端：`D:\AAgodot\FPS\ai\AIServiceSupervisor.gd`。
 
 主要路由：
 
@@ -156,7 +156,7 @@ D:\AAgodot\Server\data\runtime\conversations.sqlite3
    - world knowledge
    - recent dialogue
 6. 调用 LLM。
-7. 解析完整 JSON。
+7. 由 PydanticAI 校验结构化输出（不再维护独立 ResponseParser）。
 8. 执行行为后处理：修正动作、表情、命令、称呼。
 9. 写入新的长期记忆和 assistant turn。
 10. 返回完整 `ChatResponse`。
@@ -165,7 +165,7 @@ D:\AAgodot\Server\data\runtime\conversations.sqlite3
 
 ## 7. `/outing/resolve` 外出故事链路
 
-核心文件：`app/expedition_orchestrator.py`
+核心文件：`app/expedition_agent.py`、`app/expedition_orchestrator.py`
 
 Godot 调用位置：
 
@@ -181,13 +181,15 @@ D:\AAgodot\FPS\levels\outing\outing_map_level_v3.gd
 - 可生成 loot 路径白名单。
 - 可解锁邻居地点。
 - 当前 provider 配置。
+- `session_id` 与 `/chat` 共用同一条 AI 时间线；未传时默认为 `default_session`。
 
-后端现在也会给外出故事注入：
+外出使用独立的 GM Agent（不是 Mirdo Agent），并注入：
 
-- 同 session 的长期记忆；优先走 embedding-backed `session_memory`，再用 SQLite 相关性检索兜底。
+- 同 session 的近期对话和明确 `wants` 目标，让 GM 知道主角真正想找什么。
+- 同 session 的长期记忆和已经保存的 `story_markers`；同地点的 active 线索优先续写。
 - 世界知识 RAG 命中内容。
-- 固定世界基调：外面危险、避难所像家一样温暖、Mirdo 等老师回来。
-- 显式 `json_mode=True` 调用 `LLMProvider.build_chat_model()`，底层仍是 `OpenAICompatibleHTTPChatModel` / `httpx.Client`，和聊天接口同一套代理与连接复用逻辑。
+- 固定世界基调：外面危险，主角需要在风险和资源之间做决定。
+- 使用 PydanticAI `ExpeditionResponse` 结构化输出，故事标记在模型成功后由编排器统一落库。
 
 输出字段：
 
@@ -201,6 +203,8 @@ D:\AAgodot\FPS\levels\outing\outing_map_level_v3.gd
   "risk_result": "风险与代价",
   "loot": [{"item_path":"...","amount":1,"tag":"..."}],
   "discovered_clues": [],
+  "search_focus": ["玩家明确想寻找的目标"],
+  "story_markers": [{"continuity_key":"旧药店:地下室", "status":"active", "next_hooks":["寻找钥匙"]}],
   "mood": "谨慎",
   "health_damage": 0
 }

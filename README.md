@@ -10,7 +10,7 @@
 
 详细设计见：`docs/server-v2-design.md`
 
-## 开发启动（计划）
+## 本地开发启动
 
 ```powershell
 cd D:\AAgodot\Server
@@ -18,6 +18,18 @@ uv sync
 uv run uvicorn app.main:app --host 127.0.0.1 --port 5678
 ```
 
-## 发布形态（计划）
+## Docker 启动（推荐）
 
-发布时将本服务打包成 `server/xiaokong_server.exe`，由 Godot 自动启动。
+容器内监听 `0.0.0.0:5678`，宿主机仍只暴露 `127.0.0.1:5678`。
+
+```powershell
+cd D:\AAgodot\Server
+docker compose up -d --build
+docker compose logs -f mirdo-server
+```
+
+详细配置见 `docs/docker.md`。VOICEVOX GPU 仍作为宿主机独立引擎运行，容器通过 `host.docker.internal:50021` 访问。
+
+## Windows 发布形态
+
+如果不使用 Docker，也可以继续使用 `uv run uvicorn ...`；Docker 和本地 uv 启动方式共享同一套数据目录。

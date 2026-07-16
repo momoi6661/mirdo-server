@@ -1,342 +1,144 @@
-from app.character_ai.behavior_planner import CharacterBehaviorPlanner
-from app.schemas import ChatRequest, ChatResponse
+from app.character_ai.godot_behavior_validator import GodotBehaviorValidator
+from app.schemas import ActionStep, ChatRequest, ChatResponse
 
 
-def _mirdo_request(text: str) -> ChatRequest:
+def _request() -> ChatRequest:
     return ChatRequest(
-        player_text=text,
+        player_text="检查食物柜",
         context={
-            "npc": {
-                "name": "Mirdo",
-                "available_body_actions": [
-                    "idle_normal",
-                    "listen",
-                    "walk",
-                    "work_count_supplies",
-                    "work_check_shelf",
-                    "curious_peek",
-                    "cute_explain",
-                    "tiny_wave",
-                ],
-                "available_expressions": ["neutral", "joy", "surprised", "sorrow"],
-                "available_visemes": ["aa", "ih", "ou", "E", "oh"],
-            },
-            "perception": {
-                "nearby_objects": [
-                    {
-                        "id": "food_cabinet_runtime",
-                        "name": "食品柜",
-                        "type": "storage",
-                        "description": "存放食物和饮水补给的柜子。",
-                        "tags": ["storage", "food", "supplies"],
-                        "actions": ["inspect", "open"],
-                    }
-                ]
-            },
-            "known_nav_points": [
-                {
-                    "id": "food_cabinet_1_approach",
-                    "name": "食品柜1号检查点",
-                    "type": "supplies",
-                    "description": "食品柜前方的站位，适合清点食物。",
-                    "tags": ["storage", "food", "supplies", "cabinet"],
-                    "action_options": ["work_count_supplies", "work_take_item"],
-                    "expression_options": ["neutral", "fun"],
-                }
-            ],
+            "npc": {"available_body_actions": ["listen", "work_count_supplies"], "available_expressions": ["neutral", "joy"]},
+            "perception": {"nearby_objects": [{"id": "food_cabinet_runtime"}]},
+            "known_nav_points": [{"id": "food_cabinet_approach"}],
         },
     )
 
 
-def test_behavior_planner_turns_cabinet_request_into_go_to_object():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("去看看食物柜")
-    response = ChatResponse(dialogue="好呀，我看看。", emotion="好奇", expression="", action="Talk")
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == "go_to_object"
-    assert finalized.command_payload == {"target_object": "food_cabinet_runtime", "marker_role": "approach"}
-    assert finalized.action == "work_count_supplies"
-    assert finalized.expression == "surprised"
-    assert "老师" in finalized.dialogue
-    assert "队长" not in finalized.dialogue
-
-
-def test_behavior_planner_follow_and_stop_commands():
-    planner = CharacterBehaviorPlanner()
-
-    follow = planner.finalize_response(
-        _mirdo_request("跟着我"),
-        ChatResponse(dialogue="好。", emotion="乖巧", expression="joy", action="idle_normal"),
+def test_validator_keeps_agent_planned_valid_target_without_replanning():
+    result = GodotBehaviorValidator().finalize_response(
+        _request(),
+        ChatResponse(dialogue="好呀老师，我去确认一下。", action="work_count_supplies", action_line=[ActionStep(step_id="inspect", command="go_to_object", command_payload={"target_object": "food_cabinet_runtime"})]),
     )
-    assert follow.command == "follow_player"
-    assert follow.command_payload["follow_target"] == "player"
-    assert follow.action == "walk"
+    assert result.current_step_id == "inspect"
+    assert result.action_line[0].command == "go_to_object"
+    assert result.task_status == ""
+    assert result.task_reason == ""
+    assert result.next_decision_hint == ""
 
-    stop = planner.finalize_response(
-        _mirdo_request("你先别跟着我"),
-        ChatResponse(dialogue="好。", emotion="温和", expression="joy", action="walk"),
+
+def test_validator_drops_model_invented_target():
+    result = GodotBehaviorValidator().finalize_response(
+        _request(),
+        ChatResponse(dialogue="我去地下仓库。", action_line=[ActionStep(step_id="invented", command="go_to_object", command_payload={"target_object": "invented_basement"})]),
     )
-    assert stop.command == "stop_follow"
-    assert stop.command_payload == {}
-    assert stop.action == "idle_normal"
+    assert result.action_line == []
+    assert result.current_step_id == ""
 
 
-def test_behavior_planner_restricts_action_expression_and_visemes():
-    planner = CharacterBehaviorPlanner()
-    response = planner.finalize_response(
-        _mirdo_request("你好"),
+def test_validator_does_not_replan_completed_goal():
+    request = _request()
+    request.context["source_decision"] = {"kind": "external_goal_follow_up", "target_object": "food_cabinet_runtime"}
+    result = GodotBehaviorValidator().finalize_response(
+        request,
+        ChatResponse(dialogue="我再看一次。", action_line=[ActionStep(step_id="inspect-again", command="go_to_object", command_payload={"target_object": "food_cabinet_runtime"})]),
+    )
+    assert result.action_line[0].command == "go_to_object"
+
+
+def test_validator_keeps_pickup_command_for_visible_pickable_item():
+    request = _request()
+    request.context["perception"]["visible_items"] = [{"id": "bandage", "tags": ["pickable"], "actions": ["pick_up"]}]
+    result = GodotBehaviorValidator().finalize_response(
+        request,
+        ChatResponse(dialogue="老师，我拿起来看看。", action_line=[ActionStep(step_id="pickup", command="pick_up_item", command_payload={"target_object": "bandage"})]),
+    )
+    assert result.action_line[0].command == "pick_up_item"
+    assert result.action_line[0].command_payload["target_object"] == "bandage"
+
+
+def test_validator_accepts_take_from_real_container_then_give():
+    request = _request()
+    take = GodotBehaviorValidator().finalize_response(
+        request,
+        ChatResponse(dialogue="我到食品柜拿一瓶水。", action_line=[ActionStep(step_id="take", command="take_from_container", command_payload={"target_object": "food_cabinet_runtime", "item_id": "water_bottle"})]),
+    )
+    assert take.action_line[0].command == "take_from_container"
+    give = GodotBehaviorValidator().finalize_response(
+        request,
+        ChatResponse(dialogue="老师，给你。", action_line=[ActionStep(step_id="give", command="give_item_to_player", command_payload={"item_id": "water_bottle"})]),
+    )
+    assert give.action_line[0].command == "give_item_to_player"
+
+
+def test_fallback_only_handles_safe_follow_control():
+    request = _request()
+    request.player_text = "跟着我"
+    result = GodotBehaviorValidator().local_fallback_response(request)
+    assert result.action_line[0].command == "follow_player"
+
+
+def test_validator_removes_legacy_identity_terms():
+    result = GodotBehaviorValidator().finalize_response(_request(), ChatResponse(dialogue="小空收到队长的命令。"))
+    assert "小空" not in result.dialogue
+    assert "队长" not in result.dialogue
+
+
+def test_validator_exposes_the_first_action_line_step_to_godot():
+    """动作线的首步是当前唯一可执行步骤，后续步骤只作为计划返回。"""
+    result = GodotBehaviorValidator().finalize_response(
+        _request(),
         ChatResponse(
-            dialogue="队长，我在。",
-            emotion="开心",
-            expression="bad_expression",
-            action="bad_action",
-            visemes="aa、bad、ih、xx、ou",
+            dialogue="好呀老师，我先去确认食品柜。",
+            action_line=[
+                ActionStep(
+                    step_id="inspect-cabinet",
+                    command="go_to_object",
+                    command_payload={"target_object": "food_cabinet_runtime"},
+                    reason="先到柜子前确认有没有水和食物",
+                    expected_result="到达后观察柜内物品",
+                ),
+                ActionStep(
+                    step_id="look-for-water",
+                    command="use_item",
+                    command_payload={"target_object": "water_bottle"},
+                    reason="只有看见可拿的水才能喝",
+                ),
+            ],
         ),
     )
-
-    assert response.action in {"idle_normal", "listen", "walk", "work_count_supplies", "work_check_shelf", "tiny_wave"}
-    assert response.expression == "joy"
-    assert response.visemes == "aa、ih、ou"
-    assert "老师" in response.dialogue
-    assert "队长" not in response.dialogue
+    assert result.current_step_id == "inspect-cabinet"
+    assert result.action_line[0].step_id == "inspect-cabinet"
+    assert result.action_line[0].command == "go_to_object"
 
 
-def test_behavior_planner_model_failure_can_still_return_local_object_command():
-    planner = CharacterBehaviorPlanner()
-    response = planner.local_fallback_response(_mirdo_request("打开食物柜看看"))
-
-    assert response is not None
-    assert response.fallback is True
-    assert response.command == "go_to_object"
-    assert response.command_payload == {"target_object": "food_cabinet_runtime", "marker_role": "open"}
-    assert response.action == "work_count_supplies"
-
-
-def test_behavior_planner_real_outing_return_does_not_emit_movement_command():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("我回来了")
-    request.context["event"] = "real_outing_return"
-    request.context["real_outing"] = True
-    request.context["location_name"] = "超市"
-    request.context["health_damage"] = 4
-    response = ChatResponse(
-        dialogue="欢迎回来，老师。",
-        emotion="开心又关心",
-        expression="joy",
-        action="walk",
-        command="follow_player",
-        command_payload={"follow_target": "player"},
+def test_validator_drops_only_invalid_current_action_line_step():
+    """当前步目标不在 Godot 感知中时，不能把虚构目标交给执行器。"""
+    result = GodotBehaviorValidator().finalize_response(
+        _request(),
+        ChatResponse(
+            dialogue="我去地下仓库找水。",
+            action_line=[
+                ActionStep(
+                    step_id="invented-place",
+                    command="go_to_object",
+                    command_payload={"target_object": "invented_basement"},
+                ),
+                ActionStep(step_id="say-more", command="", reason="到达后再说明情况"),
+            ],
+        ),
     )
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == ""
-    assert finalized.command_payload == {}
-    assert finalized.action in {"tiny_wave", "listen", "idle_normal", "walk", "work_count_supplies", "work_check_shelf"}
-    assert finalized.action != "walk"
-    assert finalized.expression == "joy"
+    assert result.current_step_id == ""
+    assert result.action_line == []
 
 
-def test_behavior_planner_answers_hunger_question_from_stats():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("你饿不饿")
-    request.npc_stats.hunger = 82
-    response = ChatResponse(dialogue="老师，我听到啦。要我检查补给，还是陪你看看周围？", emotion="开心", expression="joy", action="listen")
-
-    finalized = planner.finalize_response(request, response)
-
-    assert "听到啦" not in finalized.dialogue
-    assert "不太饿" in finalized.dialogue
-    assert finalized.command == ""
-    assert finalized.action == "listen"
-
-
-def test_behavior_planner_answers_low_hunger_as_hungry():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo，你饿吗")
-    request.npc_stats.hunger = 18
-    response = ChatResponse(dialogue="嗯？", emotion="", expression="", action="Talk")
-
-    finalized = planner.finalize_response(request, response)
-
-    assert "有点饿" in finalized.dialogue
-    assert finalized.expression == "sorrow"
-
-
-def test_behavior_planner_answers_thirst_question_from_stats():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("你渴不渴")
-    request.npc_stats.thirst = 22
-    response = ChatResponse(dialogue="老师，我听到啦。", emotion="", expression="", action="Talk")
-
-    finalized = planner.finalize_response(request, response)
-
-    assert "有点渴" in finalized.dialogue
-    assert "听到啦" not in finalized.dialogue
-
-
-def test_behavior_planner_answers_tired_question_from_energy_context():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("你累不累")
-    request.context["resource_stats"] = {"energy": 28, "mood": 65}
-    response = ChatResponse(dialogue="老师，我听到啦。", emotion="", expression="", action="Talk")
-
-    finalized = planner.finalize_response(request, response)
-
-    assert "有点累" in finalized.dialogue
-    assert finalized.expression == "sorrow"
-
-
-
-def test_behavior_planner_external_goal_follow_up_is_result_not_repeat_navigation():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 已经按老师的指令到达目标位置并做了观察，请用Mirdo口吻给老师一个简短结果反馈，必要时提出下一步。")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {
-        "kind": "external_goal_follow_up",
-        "event": "navigation_goal_finished",
-        "target_nav_point": "bathroom_mirror_look",
-        "target_object": "bathroom_mirror",
-        "target_name": "卫生间镜子",
-        "target_description": "卫生间里的镜子，可以观察有没有异常反光。",
-        "action_hint": "靠近后看一眼镜面和周围。",
-        "arrival_action": "curious_peek",
-        "marker_role": "look",
-        "chain_id": "mirror_chain",
-        "chain_depth": 1,
-    }
-    response = ChatResponse(
-        dialogue="老师，我到镜子这里啦，镜面看起来还正常。",
-        emotion="认真",
-        expression="neutral",
-        action="curious_peek",
-        command="go_to_nav_point",
-        command_payload={"target_nav_point": "bathroom_mirror_look"},
+def test_validator_carries_godot_chain_identity_into_current_step():
+    request = _request()
+    request.context["source_decision"] = {"chain_id": "cabinet-line", "chain_depth": 2}
+    result = GodotBehaviorValidator().finalize_response(
+        request,
+        ChatResponse(
+            dialogue="我继续确认柜子。",
+            action_line=[ActionStep(step_id="continue-check", command="go_to_object", command_payload={"target_object": "food_cabinet_runtime"})],
+        ),
     )
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == ""
-    assert finalized.command_payload == {}
-    assert finalized.action == "curious_peek"
-    assert "老师" in finalized.dialogue
-
-
-def test_behavior_planner_external_goal_follow_up_can_continue_to_new_goal():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 已经按老师的指令到达目标位置并做了观察，请判断是否需要下一步。")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {
-        "kind": "external_goal_follow_up",
-        "event": "navigation_goal_finished",
-        "target_nav_point": "bathroom_mirror_look",
-        "target_name": "卫生间镜子",
-        "chain_id": "mirror_chain",
-        "chain_depth": 1,
-    }
-    response = ChatResponse(
-        dialogue="老师，镜子有点雾，我去拿工具再确认一下。",
-        emotion="认真",
-        expression="neutral",
-        action="cute_explain",
-        command="go_to_nav_point",
-        command_payload={"target_nav_point": "utility_storage_box", "marker_role": "approach"},
-    )
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == "go_to_nav_point"
-    assert finalized.command_payload["target_nav_point"] == "utility_storage_box"
-    assert finalized.command_payload["chain_id"] == "mirror_chain"
-    assert finalized.command_payload["chain_depth"] == 1
-
-
-def test_behavior_planner_external_goal_follow_up_local_fallback_mentions_arrival_target():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 已经按老师的指令到达目标位置并做了观察，请用Mirdo口吻给老师一个简短结果反馈，必要时提出下一步。")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {
-        "kind": "external_goal_follow_up",
-        "event": "navigation_goal_finished",
-        "target_name": "卫生间镜子",
-        "target_nav_point": "bathroom_mirror_look",
-        "action_hint": "检查反光。",
-        "arrival_action": "curious_peek",
-    }
-
-    response = planner.local_fallback_response(request)
-
-    assert response is not None
-    assert response.fallback is True
-    assert response.command == ""
-    assert response.command_payload == {}
-    assert "镜子" in response.dialogue
-    assert response.action == "curious_peek"
-
-def test_behavior_planner_autonomous_task_keeps_valid_nav_command_with_chain():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 主动想一下避难所下一件小事")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {
-        "kind": "autonomous_task",
-        "event": "autonomous_task_request",
-        "chain_id": "auto_chain",
-        "chain_depth": 0,
-        "reason": "食物和装备都要留意。",
-    }
-    response = ChatResponse(
-        dialogue="老师，我去清点一下食物和水。",
-        emotion="认真",
-        expression="neutral",
-        action="work_count_supplies",
-        command="go_to_nav_point",
-        command_payload={"target_nav_point": "food_cabinet_1_approach"},
-    )
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == "go_to_nav_point"
-    assert finalized.command_payload["target_nav_point"] == "food_cabinet_1_approach"
-    assert finalized.command_payload["chain_id"] == "auto_chain"
-    assert finalized.command_payload["chain_depth"] == 0
-    assert "老师" in finalized.dialogue
-
-
-def test_behavior_planner_autonomous_task_drops_unknown_nav_command():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 主动想一下避难所下一件小事")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {"kind": "autonomous_task", "chain_id": "auto_chain"}
-    response = ChatResponse(
-        dialogue="老师，我去未知点看一下。",
-        emotion="认真",
-        expression="neutral",
-        action="curious_peek",
-        command="go_to_nav_point",
-        command_payload={"target_nav_point": "unknown_point"},
-    )
-
-    finalized = planner.finalize_response(request, response)
-
-    assert finalized.command == ""
-    assert finalized.command_payload == {}
-
-
-def test_behavior_planner_autonomous_task_local_fallback_can_start_survival_task():
-    planner = CharacterBehaviorPlanner()
-    request = _mirdo_request("Mirdo 主动想一下避难所下一件小事")
-    request.context["request_source"] = "autonomous"
-    request.context["source_decision"] = {"kind": "autonomous_task", "chain_id": "auto_chain"}
-
-    response = planner.local_fallback_response(request)
-
-    assert response is not None
-    assert response.fallback is True
-    assert response.command == "go_to_nav_point"
-    assert response.command_payload["target_nav_point"] == "food_cabinet_1_approach"
-    assert response.command_payload["chain_id"] == "auto_chain"
-    assert any(word in response.dialogue for word in ["食物", "水", "装备", "医疗"])
-
-
+    assert result.action_line[0].command_payload["chain_id"] == "cabinet-line"
+    assert result.action_line[0].command_payload["chain_depth"] == 2

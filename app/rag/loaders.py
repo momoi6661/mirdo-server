@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.documents import Document
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Document:
+    page_content: str
+    metadata: dict[str, str]
 
 
 class KnowledgeLoader:
@@ -87,8 +93,8 @@ class KnowledgeLoader:
             return "outing_map_code"
         if relative.startswith("docs/") or relative.startswith("design/"):
             return "design_doc"
-        if "mirdo" in name or "action_sheet" in name or "actions" in name:
-            return "character_actions"
-        if "persona" in name or "xiaokong" in name or "小空" in name:
+        if "persona" in name or "personality" in name or "bible" in name or "mirdo" in name:
             return "persona"
+        if "action_sheet" in name or "actions" in name:
+            return "character_actions"
         return "world"

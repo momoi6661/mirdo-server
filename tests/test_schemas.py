@@ -36,3 +36,22 @@ def test_empty_player_text_is_rejected():
         assert "player_text" in str(exc)
     else:
         raise AssertionError("empty player_text should fail validation")
+
+
+def test_chat_request_accepts_structured_realtime_steering():
+    request = ChatRequest(
+        player_text="  等等，先不要过去  ",
+        steering={
+            "mode": "interrupt",
+            "phase": "presentation",
+            "target_request_id": " old-request ",
+            "target_client_sequence": 3,
+            "interrupted_dialogue": " 我正准备去看看…… ",
+            "reason": " player_guidance ",
+        },
+    )
+
+    assert request.player_text == "等等，先不要过去"
+    assert request.steering.mode == "interrupt"
+    assert request.steering.target_request_id == "old-request"
+    assert request.steering.interrupted_dialogue == "我正准备去看看……"

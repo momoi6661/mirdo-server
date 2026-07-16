@@ -1,0 +1,19 @@
+.git
+.gitignore
+.idea
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+*.pyo
+.env
+
+# 运行时状态不进入镜像；compose 会把它挂载到容器。
+data/runtime
+
+# 本地发布产物不是后端运行依赖。
+Mirdo.exe
+Mirdo.console.exe
+tests
+.codex_tmp

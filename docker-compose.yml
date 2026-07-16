@@ -1,0 +1,52 @@
+# Docker Desktop 左侧的 Compose 项目名称也固定为 Mirdo，避免显示为目录名 Server。
+name: mirdo-server
+
+services:
+  mirdo-server:
+    # 固定镜像名，避免 Compose 按目录名生成 server-mirdo-server。
+    image: mirdo-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mirdo-server
+    restart: unless-stopped
+    ports:
+      # 只暴露给本机 Godot，避免把本地模型配置接口暴露到局域网。
+      - "127.0.0.1:5678:5678"
+    extra_hosts:
+      # Linux Docker 和 Docker Desktop 都可通过这个名字访问宿主机服务。
+      - "host.docker.internal:host-gateway"
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 5678
+      SERVICE_NAME: mirdo-server
+      APP_RELOAD: "false"
+      API_BASE_URL: ${API_BASE_URL:-https://api.openai.com/v1}
+      API_KEY: ${API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}
+      PROXY_URL: ${PROXY_URL:-}
+      KNOWLEDGE_DIR: /app/data/knowledge
+      RUNTIME_DIR: /app/data/runtime
+      CONVERSATION_DB: /app/data/runtime/conversations.sqlite3
+      RAG_DB: /app/data/runtime/rag.sqlite3
+      TOP_K: ${TOP_K:-4}
+      TEMPERATURE: ${TEMPERATURE:-0.4}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-45}
+      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-0}
+      MODEL_TOOLS_ENABLED: ${MODEL_TOOLS_ENABLED:-true}
+      CHAT_TRACE_ENABLED: ${CHAT_TRACE_ENABLED:-true}
+      CONTEXT_WINDOW_TURNS: ${CONTEXT_WINDOW_TURNS:-8}
+      RAG_INCLUDE_PROJECT_TREE: ${RAG_INCLUDE_PROJECT_TREE:-false}
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      # VOICEVOX 运行在宿主机时，容器内不能写 127.0.0.1。
+      TTS_ENGINE_URL: ${TTS_ENGINE_URL:-http://host.docker.internal:50021}
+      TTS_CACHE_ENABLED: ${TTS_CACHE_ENABLED:-true}
+      TTS_PROFILE_DIR: /app/data/tts/characters
+      TTS_DIALOGUE_DIR: /app/data/dialogue
+    volumes:
+      # 对话记忆、SQLite FTS 索引、TTS WAV 与 server.log 持久化到项目目录。
+      - ./data/runtime:/app/data/runtime
+      # 修改知识库/声线配置后无需重新构建镜像。
+      - ./data/knowledge:/app/data/knowledge:ro
+      - ./data/dialogue:/app/data/dialogue:ro
+      - ./data/tts:/app/data/tts:ro

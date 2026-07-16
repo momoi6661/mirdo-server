@@ -1,0 +1,31 @@
+{
+  "character_id": "mirdo",
+  "locale": "ja_jp",
+  "scene": "opening",
+  "lines": [
+    {
+      "line_id": "opening_001",
+      "text": "……来たんだ。おかえり。",
+      "emotion": "温柔",
+      "voice_profile": "mirdo_ja"
+    },
+    {
+      "line_id": "opening_002",
+      "text": "今日は、少しだけゆっくりしていかない？",
+      "emotion": "平静",
+      "voice_profile": "mirdo_ja"
+    },
+    {
+      "line_id": "opening_003",
+      "text": "……別に、待ってたわけじゃないけど。",
+      "emotion": "害羞",
+      "voice_profile": "mirdo_ja"
+    },
+    {
+      "line_id": "opening_004",
+      "text": "何かあったら、ちゃんと私に教えてね。",
+      "emotion": "担心",
+      "voice_profile": "mirdo_ja"
+    }
+  ]
+}

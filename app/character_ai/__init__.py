@@ -1,3 +1,3 @@
-from .behavior_planner import CharacterBehaviorPlanner
+from .godot_behavior_validator import GodotBehaviorValidator
 
-__all__ = ["CharacterBehaviorPlanner"]
+__all__ = ["GodotBehaviorValidator"]

@@ -1,0 +1,29 @@
+# Python / test cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual env / local env
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Runtime state, logs, generated DB/audio
+data/runtime/
+data/models/fastembed/
+*.log
+
+# Local IDE / automation
+.idea/
+.codex_tmp/
+.learnings/
+
+# Exported game binaries
+*.exe
+*.pck
+build/
+builds/
+dist/
+exports/
