@@ -153,6 +153,15 @@ TTS 引擎需要用户自己下载、配置并启动。当前推荐 VOICEVOX GPU
 http://127.0.0.1:50021
 ```
 
+注意：直接运行 `windows-nvidia\run.exe` 通常不会启用 GPU，必须带 `--use_gpu`。
+可以使用仓库提供的便携启动脚本：
+
+```powershell
+.\scripts\start_voicevox_gpu.bat
+```
+
+脚本不会强制指定引擎位置，会从当前目录和脚本目录附近查找 `run.exe`，并优先选择 `windows-nvidia` 版本；详见：[VOICEVOX 后端联调说明](docs/tts-voicevox-guide.md)。
+
 请求里可以决定是否启用 TTS、speaker id 和音频返回方式。后端支持：
 
 - `inline`：直接在 `/chat` 返回 base64 音频，Godot 不用二次下载。
@@ -197,3 +206,5 @@ uv run pytest -q
 3. 打开 Mirdo 游戏端。
 4. 在 AI Settings 设置后端 Base URL、模型和 API Key。
 5. 与 Mirdo 对话，观察后端终端中的 input、context、tool、model_timing 日志。
+
+

@@ -7,15 +7,61 @@ cd D:\AAgodot\Server
 uv run uvicorn app.main:app --host 127.0.0.1 --port 5678
 ```
 
-VOICEVOX Engine 仍需要单独常驻在 `127.0.0.1:50021`。当前使用 Windows NVIDIA/CUDA
-版，启动脚本是：
+VOICEVOX Engine 仍需要单独常驻在 `127.0.0.1:50021`。当前推荐使用 Windows NVIDIA/CUDA
+版，但要注意：**直接双击或运行 `windows-nvidia\run.exe` 不等于启用 GPU**。
+VOICEVOX 的 GPU 包只是包含 CUDA 运行库，真正让 `/synthesis` 走 GPU 的关键是启动参数
+`--use_gpu`。
+
+推荐用仓库里的脚本启动：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File D:\AAgodot\VOICEVOX\start_engine.ps1
+cd D:\AAgodot\Server
+.\scripts\start_voicevox_gpu.bat
 ```
 
-脚本会使用 `windows-nvidia\run.exe --use_gpu`。GPU 引擎第一次合成会加载模型，之后
-短句合成明显更快；测试中预热后的 `audio_query + synthesis` 约 0.5 秒。若引擎不在默认地址，设置：
+或者直接运行 PowerShell 脚本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\AAgodot\Server\scripts\start_voicevox_gpu.ps1
+```
+
+脚本不会强制指定引擎位置，也不写死 D 盘路径。它会从下面这些位置附近自动查找 `run.exe`：
+
+1. 当前工作目录；
+2. 脚本所在目录；
+3. 上面两个目录的若干父目录；
+4. 当前目录和脚本目录的有限深度子目录；
+5. 找到多个 `run.exe` 时，优先选择路径里包含 `windows-nvidia` 的 GPU 版本。
+
+找到后使用下面的参数启动引擎：
+
+```powershell
+run.exe --host 127.0.0.1 --port 50021 --use_gpu --output_log_utf8
+```
+
+如果脚本附近找不到引擎，也可以手动指定：
+
+```powershell
+.\scripts\start_voicevox_gpu.ps1 -EngineDir "C:\path\to\windows-nvidia"
+```
+验证当前是否真在用 GPU，可以看端口进程命令行是否包含 `--use_gpu`：
+
+```powershell
+Get-NetTCPConnection -LocalPort 50021 |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Get-CimInstance Win32_Process -Filter "ProcessId=$_" } |
+  Select-Object ProcessId,ExecutablePath,CommandLine
+```
+
+正确时应类似：
+
+```text
+ExecutablePath : <你的 VOICEVOX 目录>\windows-nvidia\run.exe
+CommandLine    : ... run.exe --host 127.0.0.1 --port 50021 --use_gpu --output_log_utf8
+```
+
+GPU 引擎第一次合成会加载模型，之后短句合成明显更快；本机测试中预热后的
+`audio_query + synthesis` 可到约 0.1～0.5 秒。若引擎不在默认地址，设置：
 
 ```powershell
 $env:TTS_ENGINE_URL = "http://127.0.0.1:50021"
@@ -143,3 +189,4 @@ TTS 被关闭或引擎失败，则跳过等待，文字字幕直接完成；`/tt
 - `data/runtime/tts/`：按文本和参数哈希缓存的 WAV，不提交到 Git。
 
 新增语言时增加 `data/dialogue/{locale}/`，不修改 Python Provider。
+
