@@ -178,6 +178,7 @@ def test_chat_response_generates_tts_per_dialogue_segment(tmp_path) -> None:
     wav_path = tmp_path / "demo.wav"
     wav_path.write_bytes(b"RIFF" + (b"\0" * 80))
     calls: list[TTSSynthesisRequest] = []
+    queued: list[TTSSynthesisRequest] = []
 
     class FakeService:
         settings = SimpleNamespace(provider="voicevox")
@@ -186,8 +187,13 @@ def test_chat_response_generates_tts_per_dialogue_segment(tmp_path) -> None:
             calls.append(request)
             from app.tts.models import TTSResult
 
-            key = chr(ord("d") + len(calls) - 1) * 32
-            return TTSResult(path=str(wav_path), cache_key=key, cache_hit=False, profile_id="mirdo_ja")
+            return TTSResult(path=str(wav_path), cache_key="d" * 32, cache_hit=False, profile_id="mirdo_ja")
+
+        def queue_synthesis(self, request: TTSSynthesisRequest):
+            queued.append(request)
+            from app.tts.models import TTSResult
+
+            return TTSResult(path=str(wav_path), cache_key="e" * 32, cache_hit=False, profile_id="mirdo_ja")
 
     async def run() -> ChatResponse:
         return await attach_tts_to_response(
@@ -203,14 +209,17 @@ def test_chat_response_generates_tts_per_dialogue_segment(tmp_path) -> None:
         )
 
     response = asyncio.run(run())
-    assert len(calls) == 2
-    assert [call.text for call in calls] == ["老师，我先去看看。", "如果水还够，我就拿一瓶。"]
+    assert len(calls) == 1
+    assert len(queued) == 1
+    assert [call.text for call in calls + queued] == ["老师，我先去看看。", "如果水还够，我就拿一瓶。"]
     assert response.dialogue == "老师，我先去看看。如果水还够，我就拿一瓶。"
     assert response.tts.generated is True
     assert response.tts.cache_key == "d" * 32
     assert [segment.tts.generated for segment in response.dialogue_segments] == [True, True]
     assert [segment.tts.cache_key for segment in response.dialogue_segments] == ["d" * 32, "e" * 32]
-    assert all(segment.tts.audio_delivery == "inline" for segment in response.dialogue_segments)
+    assert response.dialogue_segments[0].tts.audio_delivery == "inline"
+    assert response.dialogue_segments[1].tts.audio_delivery == "url"
+    assert response.dialogue_segments[1].tts.pending is True
 
 def test_chat_response_can_request_url_audio_delivery(tmp_path) -> None:
     """请求 url delivery 时，后端只返回 URL，不把音频塞进 JSON。"""

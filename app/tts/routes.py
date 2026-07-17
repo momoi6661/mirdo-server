@@ -84,9 +84,13 @@ async def speakers(request: Request) -> dict[str, object]:
 
 @router.get("/audio/{cache_key}")
 async def audio(request: Request, cache_key: str) -> Response:
-    """按聊天响应里的 cache_key 返回已经生成的 WAV。"""
+    """按聊天响应里的 cache_key 返回 WAV。
 
-    path = _service(request).cached_audio(cache_key)
+    后续 segment 可能在 /chat 返回后仍由后台生成；这里会短暂等待，
+    让 Godot 播到下一句时不用因为文件暂未落盘而直接失败。
+    """
+
+    path = await _service(request).wait_for_cached_audio(cache_key, timeout=20.0)
     if path is None:
         raise HTTPException(status_code=404, detail="audio cache not found")
     # 音频是按内容哈希生成的不可变文件；允许 Godot/系统缓存，重复播放时不再

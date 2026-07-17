@@ -103,11 +103,22 @@ async def _attach_segment_tts(
     response: ChatResponse,
     profile: str,
 ) -> ChatResponse:
-    """给每个对白段落独立生成 TTS，并用顶层 tts 保留整体状态。"""
+    """给对白段落附加 TTS。首段阻塞生成，后续段后台生成。
+
+    以前这里会等待所有 ``dialogue_segments`` 的 VOICEVOX 合成完成后才返回
+    ``/chat``，导致 Godot 明明已经有文字却迟迟不能播放第一句。现在只等待
+    第一段：
+
+    - 第 0 段：同步生成，尽量 inline 返回，让首句可以马上播放；
+    - 后续段：立即返回 ``audio_url``，后台继续合成。Godot 播到对应段时
+      GET ``/tts/audio/{cache_key}``，路由会等待后台任务完成。
+    """
     response.tts = TTSOutput(requested=True, voice_profile=profile)
     first_generated: TTSOutput | None = None
-    generated_count = 0
+    queued_count = 0
     started_all = perf_counter()
+    requested_delivery = _requested_audio_delivery(request)
+
     for index, segment in enumerate(response.dialogue_segments):
         segment.tts = TTSOutput(requested=True, voice_profile=profile)
         if not segment.text.strip():
@@ -115,40 +126,61 @@ async def _attach_segment_tts(
             continue
         try:
             tts_text, text_source = _segment_tts_text(request, segment, index)
-            started = perf_counter()
-            result = await service.synthesize(
-                TTSSynthesisRequest(
-                    text=tts_text,
-                    voice_profile=profile,
-                    emotion=segment.emotion or response.emotion,
-                    emotion_intensity=response.emotion_intensity,
-                    speaker_id=request.tts_speaker_id,
-                )
+            synth_request = TTSSynthesisRequest(
+                text=tts_text,
+                voice_profile=profile,
+                emotion=segment.emotion or response.emotion,
+                emotion_intensity=response.emotion_intensity,
+                speaker_id=request.tts_speaker_id,
             )
+            started = perf_counter()
+
+            if first_generated is None:
+                result = await service.synthesize(synth_request)
+                segment.tts.generated = True
+                segment.tts.provider = service.settings.provider
+                segment.tts.text_source = text_source
+                segment.tts.audio_url = f"/tts/audio/{result.cache_key}"
+                segment.tts.cache_key = result.cache_key
+                segment.tts.cache_hit = result.cache_hit
+                segment.tts.pending = False
+                if requested_delivery == "url":
+                    segment.tts.audio_delivery = "url"
+                elif await _attach_inline_audio_if_selected(request, segment.tts, result.path):
+                    segment.tts.audio_delivery = "inline"
+                else:
+                    segment.tts.audio_delivery = "url"
+                first_generated = segment.tts.model_copy(deep=True)
+                logger.info(
+                    "tts_segment_ready index=%d cache=%s hit=%s delivery=%s chars=%d inline_bytes=%d elapsed_ms=%.1f",
+                    index,
+                    result.cache_key,
+                    result.cache_hit,
+                    segment.tts.audio_delivery,
+                    len(tts_text),
+                    segment.tts.audio_bytes,
+                    (perf_counter() - started) * 1000,
+                )
+                continue
+
+            # 后续段不再阻塞 /chat。即使请求希望 inline，后续段也用 url：
+            # 否则必须等待 bytes 读出并塞回 JSON，就失去首句快速返回的意义。
+            result = service.queue_synthesis(synth_request)
             segment.tts.generated = True
             segment.tts.provider = service.settings.provider
             segment.tts.text_source = text_source
             segment.tts.audio_url = f"/tts/audio/{result.cache_key}"
             segment.tts.cache_key = result.cache_key
             segment.tts.cache_hit = result.cache_hit
-            requested_delivery = _requested_audio_delivery(request)
-            if requested_delivery == "url":
-                segment.tts.audio_delivery = "url"
-            elif await _attach_inline_audio_if_selected(request, segment.tts, result.path):
-                segment.tts.audio_delivery = "inline"
-            else:
-                segment.tts.audio_delivery = "url"
-            generated_count += 1
-            if first_generated is None:
-                first_generated = segment.tts.model_copy(deep=True)
+            segment.tts.pending = not result.cache_hit
+            segment.tts.audio_delivery = "url"
+            queued_count += 1
             logger.info(
-                "tts_segment_ready index=%d cache=%s hit=%s delivery=%s chars=%d inline_bytes=%d elapsed_ms=%.1f",
+                "tts_segment_queued index=%d cache=%s hit=%s chars=%d elapsed_ms=%.1f",
                 index,
                 result.cache_key,
                 result.cache_hit,
-                segment.tts.audio_delivery,
                 len(tts_text),
-                segment.tts.audio_bytes,
                 (perf_counter() - started) * 1000,
             )
         except VoicevoxError as exc:
@@ -165,8 +197,9 @@ async def _attach_segment_tts(
         response.tts.generated = False
         response.tts.error = "all_segments_tts_failed"
     logger.info(
-        "tts_segments_done generated=%d total=%d elapsed_ms=%.1f",
-        generated_count,
+        "tts_segments_scheduled first_ready=%s queued=%d total=%d elapsed_ms=%.1f",
+        str(first_generated is not None),
+        queued_count,
         len(response.dialogue_segments),
         (perf_counter() - started_all) * 1000,
     )

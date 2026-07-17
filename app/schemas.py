@@ -427,6 +427,8 @@ class TTSOutput(BaseModel):
     audio_bytes: int = 0
     cache_key: str = ""
     cache_hit: bool = False
+    # True 表示后端已经给出 audio_url，但 WAV 仍在后台生成；Godot GET 时会等待。
+    pending: bool = False
     error: str = ""
 
 
