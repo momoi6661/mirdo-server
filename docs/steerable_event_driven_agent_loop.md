@@ -229,6 +229,14 @@ go_to_nav_point(food_cabinet)
   "event": "navigation_goal_finished",
   "status": "succeeded",
   "ok": true,
+  "execution": {
+    "phase": "completed",
+    "task_id": "task123",
+    "step_id": "go_cabinet",
+    "command": "go_to_nav_point",
+    "target_object": "food_cabinet",
+    "observed_at_msec": 123456789
+  },
   "observation": {
     "arrived": true,
     "target_ref": "food_cabinet"
@@ -237,6 +245,15 @@ go_to_nav_point(food_cabinet)
 ```
 
 后端把它作为工具结果，再执行一次 `agent.run`。
+
+`execution` 是 Godot 统一的执行回执，不代替 `observation`：
+
+- `execution.phase` 表示任务阶段（`completed` / `failed`）；
+- `execution.step_id`、`command`、目标字段用于对齐动作线；
+- `execution.result`（如果有）保存拿取数量、递交对象等因果结果；
+- `observation` 保存场景事实，例如柜子实际剩余物品。
+
+这样后端不需要猜测“这一小段返回属于哪一步”，也不会把 Godot 工具结果误当成玩家发言。
 
 ---
 

@@ -219,7 +219,7 @@ class MirdoContextEngine:
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False, default=str)
             lines.append(f"{key}={str(value)[:600]}")
-        for key in ["action_step", "action_line", "intent", "intent_report", "action_result", "observation"]:
+        for key in ["action_step", "action_line", "intent", "intent_report", "action_result", "execution", "observation"]:
             value = event_context.get(key)
             if isinstance(value, dict) and value:
                 encoded = json.dumps(value, ensure_ascii=False, default=str)

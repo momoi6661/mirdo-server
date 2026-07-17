@@ -182,6 +182,7 @@ def create_app(
             "status",
             "ok",
             "action_result",
+            "execution",
             "observation",
         ):
             if key not in source_decision and key in protocol:
@@ -198,6 +199,7 @@ def create_app(
             "status",
             "ok",
             "action_result",
+            "execution",
             "observation",
         ):
             if key in protocol:
@@ -245,6 +247,7 @@ def create_app(
             "task_id": request.task_id,
             "step_id": request.step_id,
             "action_result": request.action_result,
+            "execution": request.execution,
             "observation": request.observation,
         }
         return response.model_dump(mode="json")

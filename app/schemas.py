@@ -166,6 +166,8 @@ class GodotActionResultRequest(BaseModel):
     status: str = "succeeded"
     ok: bool = True
     action_result: dict[str, Any] = Field(default_factory=dict)
+    # Godot 的统一执行阶段回执；让 Agent 能区分“已到达、取物完成、等待接收”等阶段。
+    execution: dict[str, Any] = Field(default_factory=dict)
     observation: dict[str, Any] = Field(default_factory=dict)
     source_decision: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
@@ -216,7 +218,7 @@ class GodotActionResultRequest(BaseModel):
         text = "" if value is None else str(value).strip().lower()
         return text if text in {"inline", "url", "auto"} else "inline"
 
-    @field_validator("action_result", "observation", "source_decision", "context", mode="before")
+    @field_validator("action_result", "execution", "observation", "source_decision", "context", mode="before")
     @classmethod
     def _clean_protocol_dict(cls, value: Any) -> dict[str, Any]:
         return dict(value) if isinstance(value, dict) else {}
