@@ -149,8 +149,8 @@ Godot 在这个系统里不是“另一个用户”，而是 Agent 的工具执�
 正确方式：
 
 ```text
-Tool result: inspect_object succeeded.
-Observation: food_cabinet contains water_bottle x2.
+Tool result: take_from_container succeeded.
+Observation: food_cabinet_runtime contains water_bottle x1 after taking one bottle.
 ```
 
 这能避免后端把游戏观察误存成玩家说过的话。
@@ -189,15 +189,15 @@ Godot 请求后端 `/chat`：
   "action_line": [
     {
       "step_id": "go_cabinet",
-      "command": "go_to_nav_point",
-      "command_payload": {"target_ref": "food_cabinet"},
+      "command": "go_to_object",
+      "command_payload": {"target_object": "food_cabinet_runtime", "affordance": "inspect"},
       "wait_for_result": true,
-      "success_next_step": "inspect_cabinet"
+      "success_next_step": "take_water"
     },
     {
-      "step_id": "inspect_cabinet",
-      "command": "inspect_object",
-      "command_payload": {"target_ref": "food_cabinet"},
+      "step_id": "take_water",
+      "command": "take_from_container",
+      "command_payload": {"target_object": "food_cabinet_runtime", "item_id": "water_bottle", "amount": 1},
       "wait_for_result": true
     }
   ],
@@ -214,7 +214,7 @@ Godot 请求后端 `/chat`：
 Godot 执行：
 
 ```text
-go_to_nav_point(food_cabinet)
+go_to_object(food_cabinet_runtime)
 ```
 
 到达后，Godot 不是伪装成玩家，而是调用动作结果接口：
@@ -239,7 +239,7 @@ go_to_nav_point(food_cabinet)
   },
   "observation": {
     "arrived": true,
-    "target_ref": "food_cabinet"
+    "target_object": "food_cabinet_runtime"
   }
 }
 ```
@@ -255,6 +255,19 @@ go_to_nav_point(food_cabinet)
 
 这样后端不需要猜测“这一小段返回属于哪一步”，也不会把 Godot 工具结果误当成玩家发言。
 
+### 整理水的因果链
+
+“整理水”不是一次性让 Godot 播放一串动画，而是由 Agent 先给出**当前可执行的首步**：
+
+```text
+go_to_object → take_from_container → （根据真实结果决定）give_item_to_player / use_item / 结束
+```
+
+后端可以在首个响应里携带后续条件步骤，但 Godot 只执行 `current_step_id`。只有
+`take_from_container` 回执明确返回 `action_result.ok=true`、实际 `amount` 和剩余数量后，
+后端才会在下一次 `agent.run` 中决定是否递给老师或继续整理。这样“拿到水”不会被
+误报成“已经喝了/已经递出”，库存数量也只在 Godot 的真实容器操作中减少。
+
 ---
 
 ### 第三步：后端根据工具结果继续
@@ -265,14 +278,14 @@ Agent 看到导航成功，于是继续下一步：
 {
   "dialogue_segments": [
     {"text": "老师，我到了。"},
-    {"text": "我现在打开看看。"}
+    {"text": "我现在把水整理出来。"}
   ],
-  "current_step_id": "inspect_cabinet",
+  "current_step_id": "take_water",
   "action_line": [
     {
-      "step_id": "inspect_cabinet",
-      "command": "inspect_object",
-      "command_payload": {"target_ref": "food_cabinet"},
+      "step_id": "take_water",
+      "command": "take_from_container",
+      "command_payload": {"target_object": "food_cabinet_runtime", "item_id": "water_bottle", "amount": 1},
       "wait_for_result": true
     }
   ]
@@ -288,19 +301,24 @@ Godot 再执行检查。
 ```json
 {
   "session_id": "mirdo_session",
-  "tool_call_id": "task123:inspect_cabinet",
+  "tool_call_id": "task123:take_water",
   "task_id": "task123",
-  "step_id": "inspect_cabinet",
-  "command": "inspect_object",
-  "event": "object_inspected",
+  "step_id": "take_water",
+  "command": "take_from_container",
+  "event": "navigation_goal_finished",
   "status": "succeeded",
   "ok": true,
+  "execution": {
+    "phase": "completed",
+    "task_id": "task123",
+    "step_id": "take_water",
+    "command": "take_from_container",
+    "result": {"ok": true, "interaction": "take_from_container", "item_id": "water_bottle", "amount": 1, "remaining": 1}
+  },
+  "action_result": {"ok": true, "interaction": "take_from_container", "item_id": "water_bottle", "amount": 1, "remaining": 1},
   "observation": {
-    "target_ref": "food_cabinet",
-    "items": [
-      {"id": "water_bottle", "name": "水瓶", "amount": 2},
-      {"id": "bread", "name": "面包", "amount": 1}
-    ]
+    "target_object": "food_cabinet_runtime",
+    "container_remaining": [{"id": "water_bottle", "amount": 1}, {"id": "bread", "amount": 1}]
   }
 }
 ```
