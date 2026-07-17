@@ -54,7 +54,7 @@ D:\AAgodot\Server
 │  ├─ chat_orchestrator.py       # 普通 Mirdo 对话主流程
 │  ├─ expedition_agent.py        # 独立 GM Agent（主角外出故事）
 │  ├─ expedition_orchestrator.py # 外出故事生成主流程
-│  ├─ prompt_builder.py          # 普通对话 prompt 构建
+│  ├─ context_engine.py          # 普通对话 prompt 构建
 │  ├─ response_parser.py         # 模型 JSON 输出解析
 │  ├─ dialogue_text.py           # 连续输入 Agent-style 文本解析
 │  ├─ character_ai
@@ -230,7 +230,7 @@ flowchart TD
     G --> H["读取 recent turns"]
     H --> I["检索长期记忆"]
     I --> J["检索世界知识 RAG"]
-    J --> K["PromptBuilder 构建 messages"]
+    J --> K["MirdoContextEngine 构建 messages"]
     K --> L["LLMProvider 调模型"]
     L --> M["ResponseParser 解析 JSON"]
     M --> N["MemoryExtractor 抽取记忆"]
@@ -246,7 +246,7 @@ flowchart TD
 位置：
 
 ```text
-D:\AAgodot\Server\app\prompt_builder.py
+D:\AAgodot\Server\app\context_engine.py
 ```
 
 Prompt 分成三段：
@@ -1109,7 +1109,7 @@ cd D:\AAgodot\Server
 优先改：
 
 ```text
-app/prompt_builder.py
+app/context_engine.py
 app/character_ai/behavior_planner.py
 app/dialogue_text.py
 ```
@@ -1165,7 +1165,7 @@ Godot 外出地点/loot 配置
 | HTTP 路由 | `app/main.py` |
 | 普通对话主流程 | `app/chat_orchestrator.py` |
 | 外出故事主流程 | `app/expedition_orchestrator.py` |
-| prompt 规则 | `app/prompt_builder.py` |
+| prompt 规则 | `app/context_engine.py` |
 | 模型调用和代理 | `app/llm_provider.py` |
 | 请求/响应字段 | `app/schemas.py` |
 | JSON 解析 | `app/response_parser.py` |
@@ -1324,7 +1324,7 @@ Godot 每次 `/chat` 请求除了当前 `perception` 和 `known_nav_points`，�
 - `known_nav_points`：全局语义导航小球，用来移动。
 - `world_scene`：当前 Godot 场景里注册的 AI 语义物体/区域，用来回答“柜子里面有什么”“这里有哪些设施”等问题。
 
-后端 `PromptBuilder` 会把 `world_scene` 格式化进 runtime context。注意它是运行时场景事实，优先级高于静态知识库，但仍不能覆盖系统规则。
+后端 `MirdoContextEngine` 会把 `world_scene` 格式化进 runtime context。注意它是运行时场景事实，优先级高于静态知识库，但仍不能覆盖系统规则。
 
 ### 21.4 连续对话策略
 

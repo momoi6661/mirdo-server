@@ -13,7 +13,7 @@ from time import perf_counter
 from typing import Any
 
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
-from pydantic_ai import Agent, RunContext, ToolOutput
+from pydantic_ai import Agent, PromptedOutput, RunContext
 from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.capabilities.hooks import Hooks
 from pydantic_ai.messages import ModelMessage
@@ -112,13 +112,11 @@ def build_mirdo_agent(settings: Settings, resolved: ResolvedProvider, output_typ
     """构造唯一的运行时 Agent；PydanticAI 负责 tool loop 与结构化输出。"""
     build_started = perf_counter()
     model = _build_openai_chat_model(settings, resolved)
-    model_settings: dict[str, Any] = {"temperature": settings.temperature}
-    if settings.chat_max_tokens:
-        model_settings["max_tokens"] = settings.chat_max_tokens
-    output_spec = ToolOutput(
+    model_settings = _runtime_model_settings(settings, temperature=settings.temperature)
+    output_spec = _structured_output_spec(
         output_type,
         name="submit_response",
-        description="Submit the final structured response for Godot. Do not answer as plain text; call this after any needed tools.",
+        description="Submit the final structured response for Godot after any needed tools.",
     )
     agent = Agent(
         model,
@@ -291,10 +289,8 @@ def build_expedition_agent(settings: Settings, resolved: ResolvedProvider, outpu
     记忆工具只读，实际保存由外出编排器在回合成功后完成。
     """
     model = _build_openai_chat_model(settings, resolved)
-    model_settings: dict[str, Any] = {"temperature": min(settings.temperature, 0.7)}
-    if settings.chat_max_tokens:
-        model_settings["max_tokens"] = settings.chat_max_tokens
-    output_spec = ToolOutput(
+    model_settings = _runtime_model_settings(settings, temperature=min(settings.temperature, 0.7))
+    output_spec = _structured_output_spec(
         output_type,
         name="submit_expedition",
         description="Submit the final structured expedition result after checking continuity and world constraints.",
@@ -436,7 +432,7 @@ def _tool_trace_hooks() -> Hooks:
 def build_probe_agent(settings: Settings, resolved: ResolvedProvider) -> Agent:
     """健康检查也走 PydanticAI，避免为探测再保留一套底层 HTTP 实现。"""
     model = _build_openai_chat_model(settings, resolved, timeout=min(settings.request_timeout, 20))
-    model_settings = {"max_tokens": settings.chat_max_tokens} if settings.chat_max_tokens else {}
+    model_settings = _runtime_model_settings(settings)
     return Agent(model, output_type=str, instructions="只回复：pong。", model_settings=model_settings)
 
 
@@ -460,6 +456,8 @@ def _base_instructions(personality_bible: str, behavior_guide: str) -> str:
             "如果老师要求从柜子/箱子拿东西或递给老师：抵达容器后使用 take_from_container(target_object, item_id)，等 Godot 确认库存已减少，再使用 give_item_to_player(item_id)。不得只播放拿取动画，也不得在拿取成功前声称已经递出。",
             "如果 runtime_state 中存在 godot_event，先把它当作 Godot 已确认的动作结果：说明已经发生的事实和观察，再只选择一个后续动作、询问或结束任务。",
             "先说明已经观察到的原因，再说明动作线首步的后果或建议；后续步骤写成条件式计划，不要假装它们已经发生。",
+            "每回合必须根据当前事件、老师的语气、Mirdo 的需求和关系状态选择 emotion 与 emotion_intensity；不要无理由总是返回平静。允许的 emotion 包括：平静、温柔、开心、害羞、惊讶、担心、疲惫、生气、安心、期待、疑惑、紧张、害怕、难过、委屈。emotion_intensity 必须是 0.0 到 1.0 的数值；普通回应通常 0.35 到 0.65，危险、重逢或强烈情绪才使用 0.75 以上。",
+            "对白要给 TTS 留出自然韵律：疑问使用问号，惊喜或强烈反应使用感叹号，犹豫和害怕可以使用省略号；不要添加会被念出来的情绪标签或舞台说明。",
             "主对白 dialogue 使用中文。只有当运行时明确要求 generate_japanese=true 时，才同时填写 dialogue_ja；否则 dialogue_ja 必须为空。",
             "以下是必须遵循的行为规划文档：",
             behavior_guide,
@@ -467,12 +465,54 @@ def _base_instructions(personality_bible: str, behavior_guide: str) -> str:
     )
 
 
+def _runtime_model_settings(
+    settings: Settings,
+    *,
+    temperature: float | None = None,
+) -> dict[str, Any]:
+    """生成跨服务商的 PydanticAI 模型参数。
+
+    最终结构化输出统一走 ``PromptedOutput`` 后，不再需要按服务商切换输出模式。
+    这里只保留温度、最大 token 等真正通用的运行参数，避免隐藏的模型特殊分支。
+    """
+    model_settings: dict[str, Any] = {}
+    if temperature is not None:
+        model_settings["temperature"] = temperature
+    if settings.chat_max_tokens:
+        model_settings["max_tokens"] = settings.chat_max_tokens
+    return model_settings
+
+
+def _structured_output_spec(
+    output_type: Any,
+    *,
+    name: str,
+    description: str,
+) -> Any:
+    """统一使用 PydanticAI 的 PromptedOutput 生成结构化结果。
+
+    ``PromptedOutput`` 会把 ``output_type`` 这个 Pydantic 模型转换成 JSON
+    Schema，并通过 ``template`` 注入到模型提示词中。这样所有服务商都走同一套
+    “直接输出 JSON -> PydanticAI 校验成模型对象”的流程，避免按服务商分支。
+
+    注意：这只改变“最终答案”的提交方式；业务 tools 仍然由 PydanticAI 作为
+    function tools 提供给模型，模型需要记忆、知识库或动作上下文时仍可调用。
+    """
+    return PromptedOutput(
+        output_type,
+        name=name,
+        description=description,
+        template=(
+            "Return only one JSON object matching this schema. "
+            "Do not use markdown. Do not add explanations.\n{schema}"
+        ),
+    )
+
+
 def build_summary_agent(settings: Settings, resolved: ResolvedProvider) -> Agent:
     """构造专门压缩旧对话的 PydanticAI Agent，不参与角色行为和 tools。"""
     model = _build_openai_chat_model(settings, resolved)
-    model_settings: dict[str, Any] = {"temperature": 0.1}
-    if settings.chat_max_tokens:
-        model_settings["max_tokens"] = settings.chat_max_tokens
+    model_settings = _runtime_model_settings(settings, temperature=0.1)
     return Agent(
         model,
         output_type=str,

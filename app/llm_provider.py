@@ -48,6 +48,8 @@ class LLMProvider:
         model = self._first(requested.model, godot.get("model"), self.settings.chat_model)
         proxy_url = self._first(requested.proxy_url, godot.get("proxy_url"), self.settings.proxy_url)
         base_url = self._normalize_openai_base_url(base_url)
+        base_url = self._rewrite_container_local_url(base_url)
+        proxy_url = self._rewrite_container_local_url(proxy_url)
         if self._is_local_base_url(base_url):
             # 本地模型网关不应再走 HTTP 代理，否则会变成“本地 -> 本地代理 -> 本地网关”的绕路。
             proxy_url = ""
@@ -56,6 +58,32 @@ class LLMProvider:
         if not model:
             raise ProviderResolutionError("provider model is required; set it in Godot AISettings")
         return ResolvedProvider(base_url=base_url, api_key=api_key, model=model, proxy_url=proxy_url)
+
+    def _rewrite_container_local_url(self, value: str) -> str:
+        """把容器内不可达的宿主机回环地址改成 Docker 网关地址。
+
+        Godot 与 Server 都可能运行在宿主机，也可能只有 Server 在 Docker。
+        只在检测到 ``/.dockerenv`` 时改写，避免本地 ``uv run`` 调试被改变。
+        远程域名、Unix URL 和已经使用 ``host.docker.internal`` 的地址原样保留。
+        """
+        clean = value.strip()
+        if not clean or not Path("/.dockerenv").exists():
+            return clean
+        gateway = self.settings.model_host_gateway.strip()
+        if not gateway:
+            return clean
+        parsed = urlsplit(clean)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+            return clean
+        try:
+            port = parsed.port
+        except ValueError:
+            return clean
+        host = gateway
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host if port is None else f"{host}:{port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
     def _normalize_openai_base_url(self, value: str) -> str:

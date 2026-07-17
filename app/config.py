@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     api_base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     chat_model: str = "gpt-4o-mini"
+    # Docker 中访问宿主机上的 OpenAI-compatible 网关时使用的地址。
+    # Godot 的配置通常写 127.0.0.1；容器内的 127.0.0.1 指向容器自身，
+    # 因此由 LLMProvider 在解析阶段安全地改写为这个网关名。
+    model_host_gateway: str = "host.docker.internal"
     # Optional HTTP proxy for outbound OpenAI-compatible requests.
     # Can be overridden by Godot user://ai_settings.cfg or request.provider.proxy_url.
     proxy_url: str = ""
@@ -44,6 +48,11 @@ class Settings(BaseSettings):
     # 本地联调默认记录 Chat 的输入、上下文摘要和输出；provider/API Key 永不写入日志。
     chat_trace_enabled: bool = True
     context_window_turns: int = Field(default=8, ge=0, le=50)
+    # 上下文引擎的轻量预算；不会改变 SQLite 中保存的完整历史。
+    chat_context_recent_messages: int = Field(default=6, ge=2, le=30)
+    chat_context_memory_hits: int = Field(default=3, ge=0, le=12)
+    chat_context_knowledge_hits: int = Field(default=2, ge=0, le=12)
+    chat_context_story_hits: int = Field(default=2, ge=0, le=12)
     rag_include_project_tree: bool = False
 
     @computed_field

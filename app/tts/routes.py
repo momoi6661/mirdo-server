@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from .config import TTSSettings
 from .dialogue import load_dialogue
@@ -80,7 +83,7 @@ async def speakers(request: Request) -> dict[str, object]:
 
 
 @router.get("/audio/{cache_key}")
-async def audio(request: Request, cache_key: str) -> FileResponse:
+async def audio(request: Request, cache_key: str) -> Response:
     """按聊天响应里的 cache_key 返回已经生成的 WAV。"""
 
     path = _service(request).cached_audio(cache_key)
@@ -88,10 +91,8 @@ async def audio(request: Request, cache_key: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="audio cache not found")
     # 音频是按内容哈希生成的不可变文件；允许 Godot/系统缓存，重复播放时不再
     # 重新读取网络内容。Godot 自己仍保留解码后的内存缓存作为第一优先级。
-    return FileResponse(
+    return await _wav_bytes_response(
         path,
-        media_type="audio/wav",
-        filename=path.name,
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
             "X-TTS-Cache-Key": cache_key,
@@ -119,7 +120,7 @@ async def dialogue(request: Request, locale: str, character_id: str, scene: str)
 
 
 @router.post("/synthesize")
-async def synthesize(request: Request, payload: TTSSynthesisRequest) -> FileResponse:
+async def synthesize(request: Request, payload: TTSSynthesisRequest) -> Response:
     """按需生成 WAV；适合不想让聊天接口承担语音生成延迟的客户端。"""
 
     settings = _settings(request)
@@ -127,10 +128,8 @@ async def synthesize(request: Request, payload: TTSSynthesisRequest) -> FileResp
         result = await _service(request).synthesize(payload)
     except VoicevoxError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return FileResponse(
-        result.path,
-        media_type="audio/wav",
-        filename=f"{result.cache_key}.wav",
+    return await _wav_bytes_response(
+        Path(result.path),
         headers={
             "X-TTS-Provider": settings.provider,
             "X-TTS-Profile": result.profile_id,
@@ -138,3 +137,16 @@ async def synthesize(request: Request, payload: TTSSynthesisRequest) -> FileResp
             "X-TTS-Cache-Key": result.cache_key,
         },
     )
+
+
+async def _wav_bytes_response(path: Path, *, headers: dict[str, str]) -> Response:
+    """快速返回已缓存 WAV。
+
+    ``FileResponse`` 适合大文件和断点下载，但 Docker Desktop + Windows bind
+    mount 下发送几百 KB 的 TTS WAV 会有明显额外延迟。TTS 文件本来就是短对白，
+    直接在线程里读成 bytes 再交给 Starlette Response，通常比二次文件发送快。
+    """
+    body = await asyncio.to_thread(path.read_bytes)
+    final_headers = dict(headers)
+    final_headers["Content-Length"] = str(len(body))
+    return Response(content=body, media_type="audio/wav", headers=final_headers)

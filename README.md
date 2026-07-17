@@ -1,36 +1,27 @@
 # Mirdo Server
 
-Mirdo Server 是 Mirdo 游戏的本地 AI 后端服务，负责把玩家输入、Godot 场景状态、角色记忆和知识库资料组织成一次完整的 Agent 回合。
-
-它的目标不是简单转发聊天模型，而是为游戏角色提供：
-
-- PydanticAI Agent 对话
-- Pydantic Graph 回合编排
-- 工具调用式记忆与知识检索
-- Godot 行为链规划与结果接收
-- 长会话摘要与事实记忆
-- 外出 GM 故事连续性
-- 可选的 VOICEVOX TTS 生成
-- Docker / uv 两种启动方式
+Mirdo Server 是 Mirdo 游戏的本地 AI 后端。它不是简单的聊天转发服务，而是一个围绕游戏 NPC 设计的 Agent 后端：接收玩家输入和 Godot 场景状态，组织上下文，调用 PydanticAI Agent，按需使用 tools 查询记忆/知识/动作能力，然后返回 Mirdo 的对白、情绪、行为线和可选 TTS 音频。
 
 ## 仓库关系
 
 - 游戏端：`https://github.com/momoi6661/mirdo`
 - 后端服务：`https://github.com/momoi6661/mirdoserver`
 
-本仓库只放后端服务代码，不提交 Godot 导出的 exe。导出产物放到游戏仓库的 GitHub Release。
+本仓库只保存后端代码、知识库文档和服务配置；Godot 导出的 exe/zip 放到游戏仓库 Release，不提交到后端仓库。
 
-## 技术栈
+## 核心能力
 
-- Python 3.11+
-- uv
-- FastAPI / Uvicorn
-- PydanticAI
-- pydantic-graph
-- SQLite / FTS5
-- OpenAI-compatible chat model
-- VOICEVOX Engine，可选
-- Docker，可选
+- FastAPI 后端服务，默认端口 `5678`。
+- PydanticAI Agent：负责 Mirdo 对话、工具调用和结构化输出。
+- pydantic-graph：负责一轮聊天的 Graph 编排，例如保存输入、加载上下文、运行 Agent、校验并持久化。
+- Context Engineering：通过 `MirdoContextEngine` 控制每轮上下文预算，避免把所有知识、导航和历史都塞进 prompt。
+- PromptedOutput 结构化输出：统一把 Pydantic 模型转成 JSON Schema 注入提示词，再由 PydanticAI 校验结果。
+- Tools：记忆查询、知识库查询、共同经历读取、保存事实、保存故事事件、读取 Godot 可用动作。
+- SQLite / FTS5 RAG：用于知识库和轻量检索，不依赖旧向量数据库服务。
+- 长会话摘要、事实记忆、故事事件和冲突处理。
+- 外出 GM 叙事：主角外出时由独立 GM Agent 生成连续故事。
+- 可选 VOICEVOX TTS：后端可以生成日语语音并返回 URL 或 inline base64。
+- Docker / uv 两种启动方式。
 
 ## 快速启动：uv
 
@@ -54,7 +45,7 @@ docker compose up -d --build
 docker compose logs -f mirdo-server
 ```
 
-Docker Compose 项目名和容器名固定为：
+容器名固定为：
 
 ```text
 mirdo-server
@@ -66,15 +57,9 @@ mirdo-server
 http://127.0.0.1:5678
 ```
 
-更多说明见：
+## 模型配置
 
-```text
-docs/docker.md
-```
-
-## 配置
-
-复制 `.env.example` 为 `.env`，然后按需填写：
+复制 `.env.example` 为 `.env`：
 
 ```env
 API_BASE_URL=https://api.openai.com/v1
@@ -87,9 +72,40 @@ MODEL_TOOLS_ENABLED=true
 
 说明：
 
-- `CHAT_MAX_TOKENS=0` 表示不主动传 `max_tokens`，让服务商按模型默认值处理。
-- 模型接口要求 OpenAI-compatible。
-- Godot 请求里也可以传入 provider 配置覆盖默认值。
+- 模型接口按 OpenAI-compatible 形式接入。
+- `CHAT_MAX_TOKENS=0` 表示不主动传 `max_tokens`，让上游模型使用默认输出预算。
+- Godot 请求可以携带 provider 配置覆盖 `.env` 默认模型。
+- 当前最终结构化输出统一使用 `PromptedOutput`，避免按 DeepSeek/非 DeepSeek 做输出分支。
+
+## Agent 与上下文怎么工作
+
+一轮 `/chat` 大致流程：
+
+```text
+Godot /chat 请求
+  -> Graph 保存玩家输入或 Godot 动作回执
+  -> ContextEngine 生成本轮上下文计划
+  -> 并行检索记忆、知识、故事事件
+  -> Agent.run(...)
+       - 固定人格和行为规则来自 Agent instructions
+       - 本轮 runtime_state / memory / story / knowledge 来自 run instructions
+       - 最近对话来自 message_history
+       - 更深信息通过 tools 按需查询
+  -> 校验 ChatResponse
+  -> 保存记忆、故事、回复
+  -> 返回 dialogue / action_line / tts
+```
+
+关键文件：
+
+```text
+app/mirdo_agent.py       # PydanticAI Agent、tools、PromptedOutput
+app/agent_graphs.py      # Chat Graph 编排
+app/context_engine.py    # 上下文选择注入
+app/memory/              # 记忆、故事事件、摘要
+app/rag/                 # SQLite/FTS5 知识库检索
+app/tts/                 # VOICEVOX TTS 适配
+```
 
 ## 知识库与 RAG
 
@@ -98,8 +114,6 @@ MODEL_TOOLS_ENABLED=true
 ```text
 data/knowledge/
 ```
-
-当前实现使用 SQLite/FTS5 检索，不再依赖旧向量数据库运行目录。
 
 重新摄取知识库：
 
@@ -119,50 +133,38 @@ data/runtime/
 
 服务会保存：
 
-- 最近对话
-- 长会话摘要
-- 玩家事实
-- Mirdo 对玩家的印象
-- 行为任务事件
-- 外出故事连续性
+- 最近对话 turn。
+- 长会话摘要。
+- 玩家明确说出的长期事实和偏好。
+- 已发生且值得回忆的日常/剧情事件。
+- 外出故事 continuity key 和线索状态。
 
-记忆和检索不是硬塞进固定 prompt，而是作为 Agent 上下文与工具能力的一部分进入回合编排。
+普通对话不会把所有记忆直接塞进 prompt；Agent 需要更早事实时可以调用 `recall_memory`、`recall_session_summary` 或 `recall_story_events`。
 
-## Godot 行为链
+## TTS / VOICEVOX
 
-后端返回给 Godot 的行为以 `line` / action chain 为核心，Godot 执行动作后把执行结果回传给后端。这样后端能知道：
-
-- 是否到达目标
-- 是否拿到物品
-- 是否递交成功
-- 是否失败以及失败原因
-
-目标是形成：
-
-```text
-玩家说话 -> Mirdo 回复/行动 -> Godot 执行 -> 回传事件 -> 后端继续规划
-```
-
-## TTS
-
-VOICEVOX 是可选能力。默认后端不强制生成 TTS，是否生成由请求决定。TTS 引擎需要用户自己下载、配置并启动；推荐优先使用 VOICEVOX GPU 版本，GPU 版通常能明显降低语音生成等待时间。没有可用 NVIDIA GPU 时，可以使用 CPU 版作为兼容方案。
-
-VOICEVOX 默认地址：
+TTS 引擎需要用户自己下载、配置并启动。当前推荐 VOICEVOX GPU 版本，默认地址：
 
 ```text
 http://127.0.0.1:50021
 ```
 
-TTS 配置和角色音色定义位于：
+请求里可以决定是否启用 TTS、speaker id 和音频返回方式。后端支持：
+
+- `inline`：直接在 `/chat` 返回 base64 音频，Godot 不用二次下载。
+- `url`：返回后端音频 URL。
+- `auto`：由后端选择。
+
+GPU 版本通常比 CPU 版本更适合游戏实时语音；如果没有 NVIDIA GPU，也可以先用 CPU 版测试音色。
+
+## 常用接口
 
 ```text
-data/tts/
-```
-
-说明文档：
-
-```text
-docs/tts-voicevox-guide.md
+GET  /health
+POST /chat
+POST /ingest
+GET  /tts/profiles
+POST /tts/synthesize
 ```
 
 ## 测试
@@ -172,37 +174,22 @@ cd D:\AAgodot\Server
 uv run pytest -q
 ```
 
-当前提交前验证结果：
-
-```text
-82 passed
-```
+当前测试覆盖 Agent 架构、上下文工程、TTS、记忆和后端路由。
 
 ## 不提交的内容
 
-`.gitignore` 已排除：
+`.gitignore` 应排除：
 
-- `.env` 与本地密钥
-- `.venv/`
-- `__pycache__/`
-- `data/runtime/`
-- `*.sqlite3`、`*.db`
-- 生成音频：`*.wav`、`*.mp3`、`*.ogg`
-- Godot 导出产物：`*.exe`、`*.pck`
+- `.env` 和密钥。
+- `.venv/`。
+- `data/runtime/`。
+- 日志、缓存、临时文件。
+- Godot 导出的 exe/zip。
 
-## 常用命令
+## 与游戏端联调
 
-```powershell
-# 本地启动
-uv run uvicorn app.main:app --host 127.0.0.1 --port 5678
-
-# Docker 启动
-docker compose up -d --build
-
-# 查看 Docker 日志
-docker compose logs -f mirdo-server
-
-# 运行测试
-uv run pytest -q
-```
-
+1. 启动后端：`uv run uvicorn app.main:app --host 127.0.0.1 --port 5678`。
+2. 可选启动 VOICEVOX Engine：`http://127.0.0.1:50021`。
+3. 打开 Mirdo 游戏端。
+4. 在 AI Settings 设置后端 Base URL、模型和 API Key。
+5. 与 Mirdo 对话，观察后端终端中的 input、context、tool、model_timing 日志。

@@ -130,12 +130,70 @@ def test_chat_response_uses_agent_dialogue_and_emotion_for_tts() -> None:
         return await attach_tts_to_response(
             FakeService(),
             ChatRequest(player_text="你好", use_tts=True),
-            ChatResponse(dialogue="おかえり。", emotion="温柔"),
+            ChatResponse(dialogue="おかえり。", emotion="温柔", emotion_intensity=0.9),
         )
 
     response = asyncio.run(run())
     assert response.tts.requested is True
     assert response.tts.generated is True
     assert response.tts.audio_url == "/tts/audio/" + "a" * 32
+    assert response.tts.audio_delivery == "url"
     assert calls[0].text == "おかえり。"
     assert calls[0].emotion == "温柔"
+    assert calls[0].emotion_intensity == 0.9
+
+
+def test_chat_response_can_inline_small_tts_audio(tmp_path) -> None:
+    """短对白把 WAV 放进 JSON，Godot 可以跳过 /tts/audio 的第二次 GET。"""
+    wav_path = tmp_path / "demo.wav"
+    wav_bytes = b"RIFF" + (b"\0" * 80)
+    wav_path.write_bytes(wav_bytes)
+
+    class FakeService:
+        settings = SimpleNamespace(provider="voicevox")
+
+        async def synthesize(self, _request: TTSSynthesisRequest):
+            from app.tts.models import TTSResult
+
+            return TTSResult(path=str(wav_path), cache_key="b" * 32, cache_hit=True, profile_id="mirdo_ja")
+
+    async def run() -> ChatResponse:
+        return await attach_tts_to_response(
+            FakeService(),
+            ChatRequest(player_text="你好", use_tts=True, tts_inline_audio=True),
+            ChatResponse(dialogue="おかえり。"),
+        )
+
+    response = asyncio.run(run())
+    assert response.tts.generated is True
+    assert response.tts.audio_url == "/tts/audio/" + "b" * 32
+    assert response.tts.audio_delivery == "inline"
+    assert response.tts.audio_bytes == len(wav_bytes)
+    assert response.tts.audio_base64
+
+
+def test_chat_response_can_request_url_audio_delivery(tmp_path) -> None:
+    """请求 url delivery 时，后端只返回 URL，不把音频塞进 JSON。"""
+    wav_path = tmp_path / "demo.wav"
+    wav_path.write_bytes(b"RIFF" + (b"\0" * 80))
+
+    class FakeService:
+        settings = SimpleNamespace(provider="voicevox")
+
+        async def synthesize(self, _request: TTSSynthesisRequest):
+            from app.tts.models import TTSResult
+
+            return TTSResult(path=str(wav_path), cache_key="c" * 32, cache_hit=True, profile_id="mirdo_ja")
+
+    async def run() -> ChatResponse:
+        return await attach_tts_to_response(
+            FakeService(),
+            ChatRequest(player_text="你好", use_tts=True, tts_audio_delivery="url"),
+            ChatResponse(dialogue="おかえり。"),
+        )
+
+    response = asyncio.run(run())
+    assert response.tts.audio_delivery == "url"
+    assert response.tts.audio_url == "/tts/audio/" + "c" * 32
+    assert response.tts.audio_base64 == ""
+    assert response.tts.audio_bytes == 0

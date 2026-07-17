@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
+from pathlib import Path
 from time import perf_counter
 
 from ..schemas import ChatRequest, ChatResponse, TTSOutput
@@ -49,6 +52,7 @@ async def attach_tts_to_response(
                 text=tts_text,
                 voice_profile=profile,
                 emotion=response.emotion,
+                emotion_intensity=response.emotion_intensity,
                 speaker_id=request.tts_speaker_id,
             )
         )
@@ -67,11 +71,57 @@ async def attach_tts_to_response(
     response.tts.audio_url = f"/tts/audio/{result.cache_key}"
     response.tts.cache_key = result.cache_key
     response.tts.cache_hit = result.cache_hit
+    requested_delivery = _requested_audio_delivery(request)
+    if requested_delivery == "url":
+        response.tts.audio_delivery = "url"
+    elif await _attach_inline_audio_if_selected(request, response, result.path):
+        response.tts.audio_delivery = "inline"
+    else:
+        # 这里不是 Godot 的“失败后回退”，而是后端根据体积/读取结果明确选择 URL。
+        response.tts.audio_delivery = "url"
     logger.info(
-        "tts_ready cache=%s hit=%s chars=%d elapsed_ms=%.1f",
+        "tts_ready cache=%s hit=%s delivery=%s chars=%d inline_bytes=%d elapsed_ms=%.1f",
         result.cache_key,
         result.cache_hit,
+        response.tts.audio_delivery,
         len(tts_text),
+        response.tts.audio_bytes,
         (perf_counter() - started) * 1000,
     )
     return response
+
+
+def _requested_audio_delivery(request: ChatRequest) -> str:
+    """读取本次请求希望的音频传输方式，并兼容旧的 tts_inline_audio 布尔值。"""
+    delivery = str(getattr(request, "tts_audio_delivery", "inline") or "inline").strip().lower()
+    if not getattr(request, "tts_inline_audio", True):
+        delivery = "url"
+    return delivery if delivery in {"inline", "url", "auto"} else "inline"
+
+
+async def _attach_inline_audio_if_selected(
+    request: ChatRequest,
+    response: ChatResponse,
+    audio_path: str,
+) -> bool:
+    """把短 WAV 直接放入响应，减少 Godot 的第二次 HTTP 请求。
+
+    这是服务端选择的传输策略：成功时 ``audio_delivery=inline``；不适合内联
+    时由服务端明确改选 ``audio_delivery=url``，Godot 端不自行猜测。
+    """
+    if request.tts_inline_max_bytes <= 0:
+        return False
+    path = Path(audio_path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size <= 44 or size > request.tts_inline_max_bytes:
+        return False
+    try:
+        audio = await asyncio.to_thread(path.read_bytes)
+    except OSError:
+        return False
+    response.tts.audio_base64 = base64.b64encode(audio).decode("ascii")
+    response.tts.audio_bytes = len(audio)
+    return True

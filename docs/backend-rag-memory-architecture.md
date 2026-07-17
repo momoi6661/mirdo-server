@@ -150,7 +150,7 @@ D:\AAgodot\Server\data\runtime\conversations.sqlite3
 2. 读取最近对话。
 3. 使用 `search_memory_facts` 检索长期记忆。
 4. 使用 Chroma RAG 检索世界知识。
-5. `PromptBuilder` 组装：
+5. `MirdoContextEngine` 组装：
    - runtime state
    - long-term memory
    - world knowledge

@@ -10,7 +10,7 @@ from .llm_provider import LLMProvider
 from .memory.extractor import MemoryExtractor
 from .memory.store import MemoryStore
 from .mirdo_agent import AgentFactory, AgentPool, build_mirdo_agent
-from .prompt_builder import PromptBuilder
+from .context_engine import MirdoContextEngine
 from .schemas import ChatRequest, ChatResponse
 
 
@@ -50,7 +50,7 @@ class ChatOrchestrator:
         settings: Settings,
         memory_store: MemoryStore,
         llm_provider: LLMProvider,
-        prompt_builder: PromptBuilder | None = None,
+        context_engine: MirdoContextEngine | None = None,
         rag_retriever: Any | None = None,
         memory_retriever: Any | None = None,
         memory_extractor: MemoryExtractor | None = None,
@@ -66,7 +66,7 @@ class ChatOrchestrator:
             llm_provider=llm_provider,
             agent_factory=agent_factory,
             agent_pool=agent_pool,
-            prompt_builder=prompt_builder or PromptBuilder(),
+            context_engine=context_engine or MirdoContextEngine(settings),
             rag_retriever=rag_retriever,
             memory_retriever=memory_retriever,
             memory_extractor=memory_extractor or MemoryExtractor(),

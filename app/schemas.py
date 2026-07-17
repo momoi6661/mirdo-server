@@ -83,6 +83,11 @@ class ChatRequest(BaseModel):
     tts_voice_profile: str = "mirdo_ja"
     # 可选的 VOICEVOX 风格 ID；传入后优先于 profile 文件里的 speaker_id。
     tts_speaker_id: int | None = Field(default=None, ge=0)
+    # 音频传输策略：inline=随 /chat JSON 返回；url=只返回可下载 URL；auto=由后端按大小选择。
+    tts_audio_delivery: str = "inline"
+    # 兼容旧 Godot 字段；False 等价于 tts_audio_delivery=url。
+    tts_inline_audio: bool = True
+    tts_inline_max_bytes: int = Field(default=786_432, ge=0, le=2_000_000)
     # 默认只生成中文对白；请求明确传 true 时，Agent 才补充平行的日语字段。
     generate_japanese: bool = False
     provider: ProviderConfig | None = None
@@ -113,6 +118,12 @@ class ChatRequest(BaseModel):
     @classmethod
     def _clean_given_item(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
+
+    @field_validator("tts_audio_delivery", mode="before")
+    @classmethod
+    def _clean_tts_audio_delivery(cls, value: Any) -> str:
+        text = "" if value is None else str(value).strip().lower()
+        return text if text in {"inline", "url", "auto"} else "inline"
 
     @field_validator("client_request_id", "supersedes_request_id", mode="before")
     @classmethod
@@ -164,6 +175,9 @@ class GodotActionResultRequest(BaseModel):
     tts_voice_profile: str = "mirdo_ja"
     # Godot 动作结果回合也可以临时切换音色，不需要修改存档配置。
     tts_speaker_id: int | None = Field(default=None, ge=0)
+    tts_audio_delivery: str = "inline"
+    tts_inline_audio: bool = True
+    tts_inline_max_bytes: int = Field(default=786_432, ge=0, le=2_000_000)
     generate_japanese: bool = False
     provider: ProviderConfig | None = None
     client_request_id: str = ""
@@ -191,6 +205,12 @@ class GodotActionResultRequest(BaseModel):
     @classmethod
     def _default_protocol_session(cls, value: str) -> str:
         return value or "default_session"
+
+    @field_validator("tts_audio_delivery", mode="before")
+    @classmethod
+    def _clean_protocol_audio_delivery(cls, value: Any) -> str:
+        text = "" if value is None else str(value).strip().lower()
+        return text if text in {"inline", "url", "auto"} else "inline"
 
     @field_validator("action_result", "observation", "source_decision", "context", mode="before")
     @classmethod
@@ -385,14 +405,22 @@ class TaskControl(BaseModel):
 
 
 class TTSOutput(BaseModel):
-    """一次聊天是否请求并成功生成了语音。音频通过 URL 获取，不塞进 JSON。"""
+    """一次聊天是否请求并成功生成了语音。
+
+    ``audio_delivery`` 是本回合唯一应采用的传输方式。Godot 不再自行猜测
+    或失败后切换通道；这样音频慢/坏时能从协议字段直接定位。
+    """
 
     requested: bool = False
     generated: bool = False
     provider: str = ""
     voice_profile: str = "mirdo_ja"
     text_source: str = "dialogue"
+    audio_delivery: str = "none"
     audio_url: str = ""
+    audio_base64: str = ""
+    audio_format: str = "wav"
+    audio_bytes: int = 0
     cache_key: str = ""
     cache_hit: bool = False
     error: str = ""
@@ -412,6 +440,8 @@ class ChatResponse(BaseModel):
     # Agent 的中文主对白；只有请求 generate_japanese=true 时才填充此字段。
     dialogue_ja: str = ""
     emotion: str = "平静"
+    # 情绪不仅决定表情，也决定 TTS 参数从平静基线向目标情绪插值的幅度。
+    emotion_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
     expression: str = ""
     action: str = "Idle"
     action_line: list[ActionStep] = Field(default_factory=list)

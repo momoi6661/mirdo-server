@@ -22,6 +22,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 from .dialogue_text import memory_extraction_text
 from .mirdo_agent import AgentContext, AgentPool, build_summary_agent
 from .model_errors import classify_model_error
+from .context_engine import ContextPlan
 from .schemas import ChatResponse
 
 
@@ -47,6 +48,7 @@ class ChatGraphState:
     agent_messages_json: str = ""
     # Godot 工具结果不新增一条“玩家消息”，但仍然要进入同一个 Agent loop。
     is_tool_result: bool = False
+    context_plan: ContextPlan = field(default_factory=ContextPlan)
 
 
 @dataclass
@@ -58,7 +60,7 @@ class ChatGraphDeps:
     llm_provider: Any
     agent_factory: Any
     agent_pool: AgentPool | None
-    prompt_builder: Any
+    context_engine: Any
     rag_retriever: Any
     memory_retriever: Any
     memory_extractor: Any
@@ -122,6 +124,16 @@ class TurnPersisted:
 _builder = GraphBuilder(name="mirdo-chat", state_type=ChatGraphState, deps_type=ChatGraphDeps, output_type=ChatResponse)
 
 
+@_builder.step(node_id="prepare_context", label="生成受控上下文计划")
+async def prepare_context(ctx: StepContext[ChatGraphState, ChatGraphDeps, ChatReady]) -> ContextPlan:
+    """由代码生成上下文预算；模型不能跳过人格和已确认任务状态。"""
+    plan = ctx.deps.context_engine.plan(ctx.state.request)
+    ctx.state.context_plan = plan
+    # 先在数据库读取较大窗口，再按本回合计划裁剪，避免改变历史存档。
+    ctx.state.recent_turns = ctx.state.recent_turns[-plan.max_recent_messages :]
+    return plan
+
+
 @_builder.step(node_id="record_player_turn", label="保存玩家输入并准备上下文")
 async def record_player_turn(ctx: StepContext[ChatGraphState, ChatGraphDeps, None]) -> ChatReady:
     """处理分支存档，并区分玩家输入与 Godot tool result。
@@ -159,7 +171,7 @@ async def record_player_turn(ctx: StepContext[ChatGraphState, ChatGraphDeps, Non
 
 
 @_builder.step(node_id="load_context", label="加载记忆与知识上下文")
-async def load_context(ctx: StepContext[ChatGraphState, ChatGraphDeps, ChatReady]) -> ContextLoadRequested:
+async def load_context(ctx: StepContext[ChatGraphState, ChatGraphDeps, ContextPlan]) -> ContextLoadRequested:
     """发起上下文加载。
 
     后续两个 retrieval step 会由 broadcast 并行执行，再由 join/reducer 汇合。
@@ -171,34 +183,48 @@ async def load_context(ctx: StepContext[ChatGraphState, ChatGraphDeps, ChatReady
 async def retrieve_memory(ctx: StepContext[ChatGraphState, ChatGraphDeps, ContextLoadRequested]) -> MemoryContext:
     """在线程中查询 SQLite 记忆，避免阻塞知识检索支路。"""
     retriever = ctx.deps.memory_retriever
-    if retriever is None:
+    plan = ctx.state.context_plan
+    if retriever is None or plan.max_memory_hits <= 0:
         return MemoryContext([])
-    facts = await asyncio.to_thread(retriever.retrieve, ctx.state.request.session_id, ctx.state.request.player_text, 12)
-    return MemoryContext(list(facts))
+    facts = await asyncio.to_thread(
+        retriever.retrieve,
+        ctx.state.request.session_id,
+        ctx.state.request.player_text,
+        plan.max_memory_hits,
+    )
+    return MemoryContext(list(facts)[: plan.max_memory_hits])
 
 
 @_builder.step(node_id="retrieve_knowledge", label="并行检索知识库")
 async def retrieve_knowledge(ctx: StepContext[ChatGraphState, ChatGraphDeps, ContextLoadRequested]) -> KnowledgeContext:
     """在线程中查询 FTS5 知识库，和记忆检索同时进行。"""
     retriever = ctx.deps.rag_retriever
-    if retriever is None:
+    plan = ctx.state.context_plan
+    if retriever is None or plan.max_knowledge_hits <= 0:
         return KnowledgeContext([])
-    hits = await asyncio.to_thread(retriever.retrieve, ctx.state.request.player_text, 4)
+    hits = await asyncio.to_thread(retriever.retrieve, ctx.state.request.player_text, plan.max_knowledge_hits)
     # 人格与行为规划已作为 Agent 的稳定 instructions 加载，避免 RAG 再重复一次。
     return KnowledgeContext(
         [
             hit
             for hit in hits
             if str(hit.get("source", "")).replace("\\", "/").rsplit("/", 1)[-1] not in _STATIC_AGENT_DOCUMENTS
-        ]
+        ][: plan.max_knowledge_hits]
     )
 
 
 @_builder.step(node_id="retrieve_story_events", label="并行读取共同经历")
 async def retrieve_story_events(ctx: StepContext[ChatGraphState, ChatGraphDeps, ContextLoadRequested]) -> StoryContext:
     """读取最近共同经历，让 Mirdo 能把生活点滴接入当前回合。"""
-    events = await asyncio.to_thread(ctx.deps.memory_store.get_story_events, ctx.state.request.session_id, 6)
-    return StoryContext(list(events))
+    plan = ctx.state.context_plan
+    if plan.max_story_hits <= 0:
+        return StoryContext([])
+    events = await asyncio.to_thread(
+        ctx.deps.memory_store.get_story_events,
+        ctx.state.request.session_id,
+        plan.max_story_hits,
+    )
+    return StoryContext(list(events)[: plan.max_story_hits])
 
 
 def merge_context(
@@ -236,6 +262,7 @@ async def plan_behavior(
             session_id=state.request.session_id,
             model=state.resolved_provider.model,
             message_history_turns=len(state.recent_turns[:-1]),
+            context_plan=state.context_plan.__dict__,
             memory=state.memory,
             knowledge_sources=[str(hit.get("source", "")) for hit in state.knowledge],
             story_events=state.recalled_story_events,
@@ -251,12 +278,24 @@ async def plan_behavior(
             )
         agent_acquire_ms = int((perf_counter() - agent_acquire_started) * 1000)
         summary, _summary_turn_id = deps.memory_store.get_session_summary(state.request.session_id)
-        runtime_instructions = deps.prompt_builder.build(
+        runtime_instructions = deps.context_engine.build(
             request=state.request,
             memory_facts=state.memory,
             knowledge_hits=state.knowledge,
             story_events=state.recalled_story_events,
             session_summary=summary,
+            context_plan=state.context_plan,
+        )
+        _trace(
+            deps,
+            "context_assembled",
+            session_id=state.request.session_id,
+            mode=state.context_plan.mode,
+            instruction_chars=len(runtime_instructions),
+            history_messages=len(state.recent_turns[:-1] if not state.is_tool_result else state.recent_turns),
+            memory_count=len(state.memory),
+            knowledge_count=len(state.knowledge),
+            story_count=len(state.recalled_story_events),
         )
         agent_run_started = perf_counter()
         # 普通聊天刚刚写入了最后一条 user turn，所以排除它；tool result 没有
@@ -284,6 +323,19 @@ async def plan_behavior(
             agent_run_ms=int((perf_counter() - agent_run_started) * 1000),
         )
     except Exception as exc:
+        # 这里必须把上游 body 打到服务终端：/chat 会降级为本地 fallback，
+        # 如果不记录 body，终端只能看到 httpx 的 400 行，无法判断是模型名、
+        # tool_choice、thinking 还是 JSON schema 被服务商拒绝。
+        status_code = getattr(exc, "status_code", None)
+        body = getattr(exc, "body", None)
+        if status_code is not None or body is not None:
+            _CHAT_LOGGER.warning(
+                "[ChatModelError] session=%s type=%s status=%s body=%s",
+                state.request.session_id,
+                exc.__class__.__name__,
+                status_code,
+                str(body)[:1000] if body is not None else "",
+            )
         _trace(
             deps,
             "model_failure",
@@ -353,7 +405,8 @@ _route_plan = _builder.decision(note="使用成功的行为计划，或保存安
 _route_plan = _route_plan.branch(_builder.match(BehaviorPlanned).to(persist_planned_response))
 _route_plan = _route_plan.branch(_builder.match(BehaviorPlanningFailed).to(persist_safe_fallback))
 _builder.add(_builder.edge_from(_builder.start_node).to(record_player_turn))
-_builder.add(_builder.edge_from(record_player_turn).to(load_context))
+_builder.add(_builder.edge_from(record_player_turn).to(prepare_context))
+_builder.add(_builder.edge_from(prepare_context).to(load_context))
 _builder.add(_builder.edge_from(load_context).to(retrieve_memory, retrieve_knowledge, retrieve_story_events, fork_id="context_retrieval"))
 _builder.add(_builder.edge_from(retrieve_memory, retrieve_knowledge, retrieve_story_events).to(_context_join))
 _builder.add(_builder.edge_from(_context_join).to(plan_behavior))

@@ -16,8 +16,8 @@ from app.llm_provider import LLMProvider, ResolvedProvider
 from app.main import create_app
 from app.memory.store import MemoryStore
 from app.memory.retriever import MemoryRAGRetriever
-from app.mirdo_agent import AgentPool, build_mirdo_agent, build_probe_agent, build_summary_agent, load_behavior_guide, load_personality_bible
-from app.prompt_builder import PromptBuilder
+from app.mirdo_agent import AgentContext, AgentPool, build_mirdo_agent, build_probe_agent, build_summary_agent, load_behavior_guide, load_personality_bible
+from app.context_engine import MirdoContextEngine
 from app.schemas import ActionStep, ChatRequest, ChatResponse, ExpeditionRequest, ExpeditionResponse, ProviderConfig
 
 
@@ -569,7 +569,7 @@ def test_chat_graph_parallelizes_context_and_joins_before_planning():
 
 
 def test_prompt_marks_autonomous_request_source():
-    prompt = PromptBuilder().build(
+    prompt = MirdoContextEngine().build(
         request=ChatRequest(player_text="Mirdo 主动想一想", context={"request_source": "autonomous"})
     )
 
@@ -577,7 +577,7 @@ def test_prompt_marks_autonomous_request_source():
 
 
 def test_prompt_includes_verified_godot_event_context():
-    prompt = PromptBuilder().build(
+    prompt = MirdoContextEngine().build(
         request=ChatRequest(
             player_text="到达后反馈",
             context={
@@ -604,3 +604,55 @@ def test_prompt_includes_verified_godot_event_context():
     assert "target_marker_path" in prompt
     assert "runtime_snapshot.current_behavior" in prompt
     assert "runtime_snapshot.perception=" in prompt
+
+
+def test_chat_agent_uses_prompted_output_for_all_providers(tmp_path: Path):
+    """最终结构化输出统一走 PromptedOutput，不再按服务商切换 ToolOutput。"""
+
+    async def check():
+        settings = _settings(tmp_path)
+        cases = [
+            (
+                "deepseek",
+                ResolvedProvider(
+                    base_url="https://api.deepseek.com/v1",
+                    api_key="test-key",
+                    model="deepseek-v4-flash",
+                ),
+            ),
+            (
+                "openai-compatible",
+                ResolvedProvider(
+                    base_url="https://api.openai.com/v1",
+                    api_key="test-key",
+                    model="gpt-4o-mini",
+                ),
+            ),
+        ]
+
+        for session_id, resolved in cases:
+            agent = build_mirdo_agent(settings, resolved, ChatResponse)
+            seen = {}
+
+            async def inspect_request(_messages, _stream, model_settings, model_request_parameters):
+                tools, choice = agent.model._get_tool_choice(model_settings, model_request_parameters)
+                seen["output_mode"] = model_request_parameters.output_mode
+                seen["allow_text_output"] = model_request_parameters.allow_text_output
+                seen["tool_choice"] = choice
+                seen["tools"] = [tool["function"]["name"] for tool in tools]
+                raise RuntimeError("stop before network")
+
+            agent.model._completions_create = inspect_request
+            request = ChatRequest(session_id=session_id, player_text="你好")
+            try:
+                await agent.run("你好", deps=AgentContext(request, None, None))
+            except RuntimeError as exc:
+                assert str(exc) == "stop before network"
+
+            assert seen["output_mode"] == "prompted"
+            assert seen["allow_text_output"] is True
+            assert seen["tool_choice"] == "auto"
+            assert "submit_response" not in seen["tools"]
+            assert "recall_memory" in seen["tools"]
+
+    asyncio.run(check())

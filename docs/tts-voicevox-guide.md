@@ -1,6 +1,6 @@
 # VOICEVOX 后端联调说明
 
-当前阶段只验证 Server，不修改 Godot。主后端启动后，TTS 接口也在同一个端口：
+主后端启动后，TTS 接口也在同一个端口：
 
 ```powershell
 cd D:\AAgodot\Server
@@ -79,7 +79,21 @@ profile 文件中的 ID，但不会修改默认配置：
 情绪参数集中在 `app/tts/profiles.py`，因此换声线不会复制一大段调音配置。
 
 `/tts/synthesize` 返回 WAV。`/chat` 默认只返回文字；请求传入 `use_tts: true` 后才会
-生成对应语音。Godot 接入时也可以直接使用返回的 `tts.audio_url`。
+生成对应语音。
+
+## 音频传输方式
+
+`/chat` 和 `/godot/action-result` 支持 `tts_audio_delivery`：
+
+| 值 | 用途 |
+| --- | --- |
+| `inline` | 默认推荐。短 WAV 直接放在 `tts.audio_base64`，Godot 不再发第二次 GET，延迟最低。 |
+| `url` | 只返回 `tts.audio_url`，适合调试缓存或音频较大时手动下载。 |
+| `auto` | 请求侧允许后端按大小选择；响应里仍会落成明确的 `tts.audio_delivery=inline/url`。 |
+
+响应里的 `tts.audio_delivery` 是唯一播放协议。Godot 不再“inline 失败后偷偷改用 url”，
+这样一旦音频字段坏了，日志会直接显示 `tts_inline_missing`、`tts_inline_invalid` 或
+`tts_url_empty`，不会出现慢在哪里看不出来的情况。
 
 ## Chat 与 Agent 的关系
 
@@ -95,8 +109,8 @@ profile 文件中的 ID，但不会修改默认配置：
 ```
 
 Agent 会返回中文 `dialogue`，以及可选的平行字段 `dialogue_ja`。VOICEVOX 的日语声线会
-优先使用 `dialogue_ja`。响应里的 `tts.audio_url` 是相对地址，例如
-`/tts/audio/<cache_key>`。不传 `use_tts` 或明确关闭时只返回文字：
+优先使用 `dialogue_ja`。默认响应会携带 `tts.audio_base64`；同时仍保留相对的
+`tts.audio_url`（例如 `/tts/audio/<cache_key>`）用于缓存调试。不传 `use_tts` 或明确关闭时只返回文字：
 
 ```json
 {
@@ -111,14 +125,14 @@ Agent 会返回中文 `dialogue`，以及可选的平行字段 `dialogue_ja`。V
 ## Godot 的字幕与播放顺序
 
 当前 `/chat` 在返回 JSON 前会等待一次 VOICEVOX 合成（缓存命中时不会再次访问引擎），
-所以 Godot 收到响应时，`tts.audio_url` 已经是可下载的 WAV 地址。Godot 的呈现顺序固定为：
+所以 Godot 收到响应时，音频已经可播放。Godot 的呈现顺序固定为：
 
 1. `CharacterAIDialogueComponent` 收到 `dialogue` 和可播放的 `tts`。
-2. 先发出 `dialogue_presenting`，`XiaokongControlComponent` 显示这一句字幕。
-3. 再由角色身上的 `AIVoicePlayer` 请求 `tts.audio_url` 并播放空间音频。
+2. 角色身上的 `AIVoicePlayer` 按 `tts.audio_delivery` 播放音频；默认直接解码 `audio_base64`。
+3. 播放器真正起播后才发出 `dialogue_presenting`，既有头顶字幕组件开始逐字显示。
 4. 音频播放器发出 `playback_finished` 后，组件才发出 `dialogue_completed`，队列中的下一句才会继续。
 
-因此不会出现声音先于字幕，也不会在语音尚未结束时切换下一句。若 `tts.generated=false`、
+因此不会出现字幕先排队但声音迟迟没跟上的情况，也不会在语音尚未结束时切换下一句。若 `tts.generated=false`、
 TTS 被关闭或引擎失败，则跳过等待，文字字幕直接完成；`/tts/synthesize` 仍可用于需要
 “先返回文字、之后单独合成”的客户端。
 
