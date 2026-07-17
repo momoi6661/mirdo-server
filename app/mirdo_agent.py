@@ -152,13 +152,14 @@ def build_mirdo_agent(settings: Settings, resolved: ResolvedProvider, output_typ
         else:
             turn_rule = "这是老师主动发起的对话：优先回应老师的意图，再决定是否需要一个安全动作。"
         if bool(getattr(ctx.deps.request, "generate_japanese", False)):
-            translation_rule = "本回合请求了日语平行字段：先生成自然的中文 dialogue，再把同一含义和情绪翻译到 dialogue_ja；不要在 dialogue_ja 中加入解释或额外剧情。"
+            translation_rule = "本回合请求了日语平行字段：先生成自然的中文 dialogue_segments[].text，再为每段填写同一含义和情绪的 dialogue_segments[].text_ja；dialogue_ja 是这些日语段落的拼接，不要加入解释或额外剧情。"
         else:
-            translation_rule = "本回合没有请求日语平行字段：dialogue_ja 必须留空字符串。"
+            translation_rule = "本回合没有请求日语平行字段：dialogue_ja 和 dialogue_segments[].text_ja 必须留空字符串。"
         if steering_mode != "none":
             steering_rule = (
                 "这是玩家对正在进行回合的实时引导。当前 player_text 是最高优先级的最新意图；"
                 "不要继续被替代的对白措辞或动作线，也不要向玩家解释请求序号、取消请求等内部机制。"
+                "如果 steering.heard_dialogue 非空，表示这句话已经自然说完；如果 steering.interrupted_dialogue 非空，表示这些后续旧对白还没说，不要重复。"
                 "结合 runtime_state 中的 steering 和当前任务，用 task_control 明确选择 continue、pause、replace 或 cancel，"
                 "然后像自然被打断的人一样重新回应。"
             )
@@ -458,7 +459,9 @@ def _base_instructions(personality_bible: str, behavior_guide: str) -> str:
             "先说明已经观察到的原因，再说明动作线首步的后果或建议；后续步骤写成条件式计划，不要假装它们已经发生。",
             "每回合必须根据当前事件、老师的语气、Mirdo 的需求和关系状态选择 emotion 与 emotion_intensity；不要无理由总是返回平静。允许的 emotion 包括：平静、温柔、开心、害羞、惊讶、担心、疲惫、生气、安心、期待、疑惑、紧张、害怕、难过、委屈。emotion_intensity 必须是 0.0 到 1.0 的数值；普通回应通常 0.35 到 0.65，危险、重逢或强烈情绪才使用 0.75 以上。",
             "对白要给 TTS 留出自然韵律：疑问使用问号，惊喜或强烈反应使用感叹号，犹豫和害怕可以使用省略号；不要添加会被念出来的情绪标签或舞台说明。",
-            "主对白 dialogue 使用中文。只有当运行时明确要求 generate_japanese=true 时，才同时填写 dialogue_ja；否则 dialogue_ja 必须为空。",
+            "必须优先填写 dialogue_segments：把 Mirdo 的对白拆成 1 到 3 个自然短句，每段适合一次字幕和一次 TTS，通常 8 到 28 个中文字符；不要把多个动作说明塞进一个长句。dialogue 是所有 dialogue_segments[].text 的自然拼接，用于兼容旧客户端。",
+            "如果本回合包含动作、询问或解释，把它们按语义拆段：先回应老师/观察事实，再说将要做的第一步，必要时最后用一个短问题或提醒。每段都只能是 Mirdo 会直接说出口的话。",
+            "主对白 dialogue_segments[].text 和 dialogue 使用中文。只有当运行时明确要求 generate_japanese=true 时，才同时填写 dialogue_segments[].text_ja 和 dialogue_ja；否则日语字段必须为空。",
             "以下是必须遵循的行为规划文档：",
             behavior_guide,
         ]

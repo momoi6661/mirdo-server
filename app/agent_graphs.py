@@ -448,6 +448,8 @@ def _finish_turn(state: ChatGraphState, deps: ChatGraphDeps, response: ChatRespo
     # 这是协议边界：未请求翻译时，即使模型多填了字段也不向客户端暴露。
     if not bool(getattr(state.request, "generate_japanese", False)):
         response.dialogue_ja = ""
+        for segment in response.dialogue_segments:
+            segment.text_ja = ""
     steering = getattr(state.request, "steering", None)
     steering_mode = str(getattr(steering, "mode", "none") or "none")
     if steering_mode != "none":

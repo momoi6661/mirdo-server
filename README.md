@@ -77,6 +77,10 @@ MODEL_TOOLS_ENABLED=true
 - Godot 请求可以携带 provider 配置覆盖 `.env` 默认模型。
 - 当前最终结构化输出统一使用 `PromptedOutput`，避免按 DeepSeek/非 DeepSeek 做输出分支。
 
+## 架构文档
+
+- [可引导的事件驱动 Agent 循环](docs/steerable_event_driven_agent_loop.md)：详细说明 Human-in-the-loop、steering、Godot tool result、动作回执和多次 `agent.run` 如何组成连续 NPC 行为。
+
 ## Agent 与上下文怎么工作
 
 一轮 `/chat` 大致流程：

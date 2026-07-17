@@ -11,7 +11,7 @@ from app.tts.models import TTSSynthesisRequest
 from app.tts.profiles import MirdoVoiceProfile
 from app.tts.service import TTSService
 from app.tts.voicevox import VoicevoxClient
-from app.schemas import ChatRequest, ChatResponse
+from app.schemas import ChatRequest, ChatResponse, DialogueSegment
 
 
 def test_voicevox_adapter_uses_audio_query_then_synthesis() -> None:
@@ -171,6 +171,46 @@ def test_chat_response_can_inline_small_tts_audio(tmp_path) -> None:
     assert response.tts.audio_bytes == len(wav_bytes)
     assert response.tts.audio_base64
 
+
+
+def test_chat_response_generates_tts_per_dialogue_segment(tmp_path) -> None:
+    """新对白协议会让每段字幕拿到自己的短音频，顶层 tts 只做旧客户端兼容。"""
+    wav_path = tmp_path / "demo.wav"
+    wav_path.write_bytes(b"RIFF" + (b"\0" * 80))
+    calls: list[TTSSynthesisRequest] = []
+
+    class FakeService:
+        settings = SimpleNamespace(provider="voicevox")
+
+        async def synthesize(self, request: TTSSynthesisRequest):
+            calls.append(request)
+            from app.tts.models import TTSResult
+
+            key = chr(ord("d") + len(calls) - 1) * 32
+            return TTSResult(path=str(wav_path), cache_key=key, cache_hit=False, profile_id="mirdo_ja")
+
+    async def run() -> ChatResponse:
+        return await attach_tts_to_response(
+            FakeService(),
+            ChatRequest(player_text="你好", use_tts=True, tts_inline_audio=True),
+            ChatResponse(
+                dialogue_segments=[
+                    DialogueSegment(text="老师，我先去看看。"),
+                    DialogueSegment(text="如果水还够，我就拿一瓶。"),
+                ],
+                emotion="温柔",
+            ),
+        )
+
+    response = asyncio.run(run())
+    assert len(calls) == 2
+    assert [call.text for call in calls] == ["老师，我先去看看。", "如果水还够，我就拿一瓶。"]
+    assert response.dialogue == "老师，我先去看看。如果水还够，我就拿一瓶。"
+    assert response.tts.generated is True
+    assert response.tts.cache_key == "d" * 32
+    assert [segment.tts.generated for segment in response.dialogue_segments] == [True, True]
+    assert [segment.tts.cache_key for segment in response.dialogue_segments] == ["d" * 32, "e" * 32]
+    assert all(segment.tts.audio_delivery == "inline" for segment in response.dialogue_segments)
 
 def test_chat_response_can_request_url_audio_delivery(tmp_path) -> None:
     """请求 url delivery 时，后端只返回 URL，不把音频塞进 JSON。"""

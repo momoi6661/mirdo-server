@@ -58,9 +58,13 @@ class SteeringInput(BaseModel):
     target_request_id: str = ""
     target_client_sequence: int = Field(default=0, ge=0)
     interrupted_dialogue: str = Field(default="", max_length=500)
+    # presentation 边界介入时，Godot 会告诉后端：当前已经自然说完了哪一句。
+    heard_dialogue: str = Field(default="", max_length=500)
+    # segment_finished / speech_finished / segment_failed 等，不伪装成玩家文本。
+    boundary_reason: str = ""
     reason: str = ""
 
-    @field_validator("target_request_id", "interrupted_dialogue", "reason", mode="before")
+    @field_validator("target_request_id", "interrupted_dialogue", "heard_dialogue", "boundary_reason", "reason", mode="before")
     @classmethod
     def _clean_text(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
@@ -426,6 +430,28 @@ class TTSOutput(BaseModel):
     error: str = ""
 
 
+class DialogueSegment(BaseModel):
+    """一段可独立显示、独立合成 TTS 的 Mirdo 台词。
+
+    这里不是前端分页，而是让 Agent 在生成阶段就把“说话节奏”拆好：
+    每段对应一次头顶字幕和一次语音播放。这样 Godot 不需要猜哪里断句，
+    也不会把一大段 WAV 全部准备好后才开始呈现。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = ""
+    text_ja: str = ""
+    emotion: str = ""
+    expression: str = ""
+    tts: TTSOutput = Field(default_factory=TTSOutput)
+
+    @field_validator("text", "text_ja", "emotion", "expression", mode="before")
+    @classmethod
+    def _clean_segment_text(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+
 class ChatResponse(BaseModel):
     """Mirdo 本回合的动作线和对白，也是 Godot 的唯一响应契约。
 
@@ -436,9 +462,11 @@ class ChatResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     ok: bool = True
-    dialogue: str
+    dialogue: str = ""
     # Agent 的中文主对白；只有请求 generate_japanese=true 时才填充此字段。
     dialogue_ja: str = ""
+    # 推荐 Agent 填写：1 到 3 个自然短句，每段独立配字幕和 TTS。
+    dialogue_segments: list[DialogueSegment] = Field(default_factory=list)
     emotion: str = "平静"
     # 情绪不仅决定表情，也决定 TTS 参数从平静基线向目标情绪插值的幅度。
     emotion_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
@@ -478,3 +506,61 @@ class ChatResponse(BaseModel):
     fallback: bool = False
     error: str = ""
     tts: TTSOutput = Field(default_factory=TTSOutput)
+
+    @field_validator("dialogue", "dialogue_ja", "expression", "action", "current_step_id", "task_id", "task_status", "task_reason", "next_decision_hint", "visemes", "viseme_sequence", "session_id", "forked_from", "response_kind", "client_request_id", "tool_call_id", "error", mode="before")
+    @classmethod
+    def _clean_response_text(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @model_validator(mode="after")
+    def _normalize_dialogue_segments(self) -> "ChatResponse":
+        """保持旧字段和新分段字段同步，兼容旧模型/旧 Godot。
+
+        - 新模型可只填 ``dialogue_segments``，这里会拼回 ``dialogue``；
+        - 旧模型只填 ``dialogue`` 时，这里会按标点做保底拆句；
+        - 顶层 ``dialogue`` 仍作为日志、记忆和旧客户端的兼容字段。
+        """
+        cleaned: list[DialogueSegment] = []
+        for segment in self.dialogue_segments:
+            if segment.text.strip():
+                cleaned.append(segment)
+        if not cleaned and self.dialogue.strip():
+            ja_parts = _split_dialogue_text(self.dialogue_ja) if self.dialogue_ja.strip() else []
+            for index, text in enumerate(_split_dialogue_text(self.dialogue)):
+                cleaned.append(
+                    DialogueSegment(
+                        text=text,
+                        text_ja=ja_parts[index] if index < len(ja_parts) else "",
+                        emotion=self.emotion,
+                        expression=self.expression,
+                    )
+                )
+        self.dialogue_segments = cleaned[:4]
+        if self.dialogue_segments and not self.dialogue.strip():
+            self.dialogue = "".join(segment.text for segment in self.dialogue_segments).strip()
+        if self.dialogue_segments and not self.dialogue_ja.strip():
+            joined_ja = "".join(segment.text_ja for segment in self.dialogue_segments if segment.text_ja.strip()).strip()
+            if joined_ja:
+                self.dialogue_ja = joined_ja
+        return self
+
+
+def _split_dialogue_text(text: str, *, max_chars: int = 34) -> list[str]:
+    """把旧式整段对白保底拆成短句；真正的首选是让 Agent 直接填 segments。"""
+    clean = str(text or "").strip()
+    if not clean:
+        return []
+    parts: list[str] = []
+    current = ""
+    break_chars = set("。！？!?；;，,、：:")
+    for ch in clean:
+        current += ch
+        if ch in break_chars or len(current) >= max_chars:
+            piece = current.strip()
+            if piece:
+                parts.append(piece)
+            current = ""
+    tail = current.strip()
+    if tail:
+        parts.append(tail)
+    return parts[:4] or [clean]

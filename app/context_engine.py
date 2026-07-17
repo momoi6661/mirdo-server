@@ -189,6 +189,8 @@ class MirdoContextEngine:
             "target_request_id": getattr(steering, "target_request_id", ""),
             "target_client_sequence": getattr(steering, "target_client_sequence", 0),
             "interrupted_dialogue": getattr(steering, "interrupted_dialogue", ""),
+            "heard_dialogue": getattr(steering, "heard_dialogue", ""),
+            "boundary_reason": getattr(steering, "boundary_reason", ""),
             "reason": getattr(steering, "reason", ""),
         }
         return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
