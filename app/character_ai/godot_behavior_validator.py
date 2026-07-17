@@ -11,7 +11,7 @@ from ..schemas import ActionStep, ChatRequest, ChatResponse
 DEFAULT_ACTIONS = {"idle_normal", "idle_alert", "listen", "walk", "run", "tiny_wave", "react_nod", "curious_peek", "work_count_supplies", "work_check_shelf", "work_inspect_cabinet", "work_check_lower"}
 DEFAULT_EXPRESSIONS = {"neutral", "joy", "fun", "angry", "sorrow", "surprised"}
 DEFAULT_VISEMES = {"aa", "ih", "ou", "E", "oh"}
-COMMANDS = {"", "go_to_object", "go_to_nav_point", "sit_down", "follow_player", "stop_follow", "look_at_player", "pick_up_item", "take_from_container", "use_item", "eat_item", "give_item_to_player"}
+COMMANDS = {"", "go_to_marker", "go_to_object", "go_to_nav_point", "sit_down", "follow_player", "stop_follow", "look_at_player", "pick_up_item", "take_from_container", "use_item", "eat_item", "give_item_to_player"}
 
 
 class GodotBehaviorValidator:
@@ -94,9 +94,14 @@ class GodotBehaviorValidator:
     def _validate_target(self, request: ChatRequest, step: ActionStep) -> bool:
         """目标必须来自 Godot 的本轮感知或导航点，不能让模型凭空造地点。"""
         payload = step.command_payload
-        if step.command in {"go_to_object", "sit_down"}:
+        if step.command in {"go_to_marker", "go_to_object", "sit_down"}:
             valid = self._object_ids(request)
-            return str(payload.get("target_object", payload.get("target_ref", ""))) in valid
+            target = str(payload.get("target_object", payload.get("target_ref", "")))
+            if target in valid:
+                return True
+            # go_to_marker 也允许指向语义导航目录；Godot 会在本地解析
+            # Marker/NodePath，不能把这个旧命令误判成无效动作。
+            return step.command == "go_to_marker" and target in self._nav_ids(request)
         if step.command == "go_to_nav_point":
             valid = self._nav_ids(request)
             return str(payload.get("target_nav_point", payload.get("target_ref", ""))) in valid

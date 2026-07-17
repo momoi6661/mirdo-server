@@ -551,7 +551,7 @@ def _create_navigation_task(request: Any, memory_store: Any, response: ChatRespo
     current = next((step for step in response.action_line if step.step_id == response.current_step_id), None)
     if current is None:
         current = next((step for step in response.action_line if step.command), None)
-    if current is None or current.command not in {"go_to_nav_point", "go_to_object", "pick_up_item", "take_from_container", "use_item", "eat_item", "give_item_to_player"}:
+    if current is None or current.command not in {"go_to_marker", "go_to_nav_point", "go_to_object", "pick_up_item", "take_from_container", "use_item", "eat_item", "give_item_to_player"}:
         return
     payload = current.command_payload if isinstance(current.command_payload, dict) else {}
     target_ref = str(payload.get("target_nav_point", "")).strip() or str(payload.get("target_object", "")).strip()
