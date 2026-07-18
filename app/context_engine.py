@@ -68,12 +68,13 @@ class MirdoContextEngine:
         memory_limit = int(getattr(self.settings, "chat_context_memory_hits", 3))
         knowledge_limit = int(getattr(self.settings, "chat_context_knowledge_hits", 2))
         story_limit = int(getattr(self.settings, "chat_context_story_hits", 2))
-        if source in {"godot_tool", "godot_tool_result", "godot_runtime", "autonomous"} or has_task:
+        if source in {"godot_tool", "godot_tool_result", "godot_runtime", "autonomous", "autonomous_idle", "autonomous_task"} or has_task:
             return ContextPlan(
                 mode="action_receipt" if source in {"godot_tool", "godot_tool_result"} else "action",
                 max_recent_messages=4,
                 max_memory_hits=2,
-                max_story_hits=story_limit if source in {"godot_tool", "godot_tool_result"} else 0,
+                # 自主对话也必须知道共同经历，否则 Mirdo 会像刚认识老师一样重新开话题。
+                max_story_hits=story_limit if source in {"godot_tool", "godot_tool_result", "autonomous_idle", "autonomous_task"} else 0,
                 include_world_state=True,
             )
 
