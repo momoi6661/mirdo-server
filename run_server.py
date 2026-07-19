@@ -9,9 +9,15 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
+# PyInstaller 运行时没有可供 logfire.inspect 使用的源码文件；其 Pydantic
+# 插件会在冻结程序启动阶段触发 OSError。后端并不依赖该可选观测插件，
+# 禁用它也让源码运行与发布运行保持一致。
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
+
 import uvicorn
 
 from app.config import get_settings
+from app.main import app as application
 from app.logging_setup import configure_file_logging
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,7 +108,14 @@ def _wait_for_existing_server(url: str, timeout_seconds: float = _STARTUP_WAIT_S
 
 def main() -> None:
     """启动 Mirdo 后端；同一端口同一时间只允许一个服务实例。"""
-    os.chdir(Path(__file__).resolve().parent)
+    # 源码运行时 __file__ 在项目根目录；PyInstaller onedir 运行时
+    # __file__ 位于 _internal，资源和 .env 则位于 MirdoServer.exe 同级目录。
+    bundle_dir = (
+        Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent
+    )
+    os.chdir(bundle_dir)
     settings = get_settings()
     settings.ensure_runtime_dirs()
     configure_file_logging(settings.runtime_dir)
@@ -128,7 +141,7 @@ def main() -> None:
 
         _LOGGER.info("backend_starting host=%s port=%d", settings.app_host, settings.app_port)
         uvicorn.run(
-            "app.main:app",
+            application,
             host=settings.app_host,
             port=settings.app_port,
             reload=settings.app_reload,
