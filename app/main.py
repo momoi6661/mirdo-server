@@ -318,6 +318,25 @@ def create_app(
         memory_store: MemoryStore = app.state.memory_store
         return memory_store.get_session_snapshot(session_id, recent_limit)
 
+    @app.delete("/session/{session_id}")
+    async def delete_session(session_id: str) -> dict:
+        """删除会话的完整数据：对话、摘要、记忆、故事和未完成任务。"""
+        memory_store: MemoryStore = app.state.memory_store
+        result = memory_store.clear_session(session_id)
+        memory_retriever = getattr(app.state, "memory_retriever", None)
+        result["memory_index_deleted"] = (
+            memory_retriever.clear_session_index(session_id)
+            if memory_retriever is not None else 0
+        )
+        result["deleted"] = any(
+            int(result.get(key, 0)) > 0
+            for key in (
+                "turns_deleted", "facts_deleted", "story_events_deleted",
+                "navigation_tasks_deleted",
+            )
+        )
+        return result
+
     @app.post("/memory/clear")
     async def clear_memory(request: MemoryClearRequest) -> dict:
         memory_store: MemoryStore = app.state.memory_store

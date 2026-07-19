@@ -880,6 +880,10 @@ class MemoryStore:
                 "delete from story_events where session_id = ?",
                 (clean_session,),
             ).rowcount
+            tasks_deleted = conn.execute(
+                "delete from navigation_tasks where session_id = ?",
+                (clean_session,),
+            ).rowcount
             conn.execute(
                 "delete from sessions where session_id = ?",
                 (clean_session,),
@@ -890,6 +894,7 @@ class MemoryStore:
             "turns_deleted": max(0, int(turns_deleted)),
             "facts_deleted": max(0, int(facts_deleted)),
             "story_events_deleted": max(0, int(events_deleted)),
+            "navigation_tasks_deleted": max(0, int(tasks_deleted)),
         }
 
     def clear_all(self) -> dict[str, Any]:
@@ -897,6 +902,7 @@ class MemoryStore:
             turns_deleted = conn.execute("delete from turns").rowcount
             facts_deleted = conn.execute("delete from memory_facts").rowcount
             events_deleted = conn.execute("delete from story_events").rowcount
+            tasks_deleted = conn.execute("delete from navigation_tasks").rowcount
             conn.execute("delete from sessions")
         return {
             "ok": True,
@@ -904,6 +910,7 @@ class MemoryStore:
             "turns_deleted": max(0, int(turns_deleted)),
             "facts_deleted": max(0, int(facts_deleted)),
             "story_events_deleted": max(0, int(events_deleted)),
+            "navigation_tasks_deleted": max(0, int(tasks_deleted)),
         }
 
     def _connect(self) -> sqlite3.Connection:
