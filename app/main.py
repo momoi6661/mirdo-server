@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -13,7 +14,7 @@ from .expedition_agent import build_expedition_agent
 from .expedition_orchestrator import ExpeditionOrchestrator
 from .llm_provider import LLMProvider
 from .logging_setup import configure_file_logging
-from .mirdo_agent import AgentFactory, AgentPool, build_mirdo_agent, build_probe_agent
+from .mirdo_agent import AgentContext, AgentFactory, AgentPool, build_mirdo_agent, build_probe_agent
 from .memory.retriever import MemoryRAGRetriever
 from .memory.store import MemoryStore
 from .rag.indexer import RAGIndexer
@@ -99,9 +100,23 @@ def create_app(
             except Exception as exc:
                 import logging
                 logging.getLogger("mirdo.startup").warning("Agent prewarm skipped: %s", exc)
+        warmup_task = None
+        if agent_pool is not None and resolved_settings.chat_model_warmup:
+            warmup_task = asyncio.create_task(
+                _warmup_chat_model(
+                    resolved_settings,
+                    llm_provider,
+                    agent_pool,
+                    agent_factory,
+                    rag_retriever,
+                    memory_retriever,
+                )
+            )
         try:
             yield
         finally:
+            if warmup_task is not None and not warmup_task.done():
+                warmup_task.cancel()
             expedition_orchestrator = getattr(app.state, "expedition_orchestrator", None)
             if expedition_orchestrator is not None:
                 await expedition_orchestrator.close()
@@ -364,6 +379,39 @@ def create_app(
         return result
 
     return app
+
+
+async def _warmup_chat_model(
+    settings: Settings,
+    llm_provider: LLMProvider,
+    agent_pool: AgentPool,
+    agent_factory: AgentFactory,
+    rag_retriever: Any,
+    memory_retriever: Any,
+) -> None:
+    """后台发送一次最小真实请求，提前建立上游模型连接和缓存前缀。"""
+    import logging
+    from pydantic_ai import UsageLimits
+
+    logger = logging.getLogger("mirdo.startup")
+    try:
+        resolved = llm_provider.resolve_provider(None)
+        agent = await agent_pool.get(
+            "chat",
+            resolved,
+            lambda: agent_factory(settings, resolved, ChatResponse),
+        )
+        warmup_request = ChatRequest(session_id="__warmup__", player_text="系统预热请求")
+        await agent.run(
+            "Reply with exactly one short acknowledgement: OK.",
+            usage_limits=UsageLimits(request_limit=1),
+            deps=AgentContext(warmup_request, rag_retriever, memory_retriever),
+        )
+        logger.info("Chat model warmup completed model=%s", resolved.model)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Chat model warmup failed: %s", exc)
 
 
 app = create_app()

@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     chat_reasoning_effort: str = "low"
     # 只预热 Agent/HTTP 客户端，不额外消耗一次模型 completion。
     chat_prewarm_agent: bool = True
+    # 是否在后台发送一次最小真实请求，提前唤醒上游模型；会消耗一次调用。
+    chat_model_warmup: bool = True
     # Agent 默认启用 tools：知识、记忆与 Godot 可执行能力都通过工具取得。
     model_tools_enabled: bool = True
     # 本地联调默认记录 Chat 的输入、上下文摘要和输出；provider/API Key 永不写入日志。
