@@ -55,7 +55,9 @@ class MirdoContextEngine:
             sections.append(f"<long_term_memory>\n{memories}\n</long_term_memory>")
         if stories:
             sections.append(f"<shared_story_events>\n{stories}\n</shared_story_events>")
-        if session_summary.strip():
+        # 普通闲聊不携带旧会话摘要；只有回忆、动作回执或自主任务才需要它。
+        include_summary = plan.mode != "chat" or plan.max_memory_hits > 0 or plan.max_story_hits > 0
+        if include_summary and session_summary.strip():
             sections.append(f"<session_summary>\n{session_summary.strip()[:2400]}\n</session_summary>")
         if knowledge:
             sections.append(f"<knowledge_candidates>\n{knowledge}\n</knowledge_candidates>")
