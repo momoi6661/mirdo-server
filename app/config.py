@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=45.0, gt=0.0)
     # 0 表示不发送 ``max_tokens``，让兼容服务商按模型默认值决定推理与输出预算。
     chat_max_tokens: int = Field(default=0, ge=0, le=4096)
+    # 兼容 OpenAI 风格服务商的通用推理强度；空字符串表示不发送该可选参数。
+    # 不同服务商可能忽略它，因此不会把它写死成某一家模型的 thinking 字段。
+    chat_reasoning_effort: str = "low"
+    # 只预热 Agent/HTTP 客户端，不额外消耗一次模型 completion。
+    chat_prewarm_agent: bool = True
     # Agent 默认启用 tools：知识、记忆与 Godot 可执行能力都通过工具取得。
     model_tools_enabled: bool = True
     # 本地联调默认记录 Chat 的输入、上下文摘要和输出；provider/API Key 永不写入日志。

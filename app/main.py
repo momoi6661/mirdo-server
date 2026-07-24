@@ -25,6 +25,7 @@ from .schemas import (
     IngestRequest,
     MemoryClearRequest,
     ProviderConfig,
+    ChatResponse,
 )
 from .tts.config import get_tts_settings
 from .tts.chat import attach_tts_to_response
@@ -85,6 +86,19 @@ def create_app(
             memory_retriever=memory_retriever,
             agent_factory=resolved_expedition_factory,
         )
+        # 启动阶段只创建并进入常驻 Agent，不发送 completion 请求；
+        # 这样首个玩家请求不会再承担 Agent 构造和 HTTP 客户端初始化成本。
+        if agent_pool is not None and resolved_settings.chat_prewarm_agent:
+            try:
+                resolved_provider = llm_provider.resolve_provider(None)
+                await agent_pool.get(
+                    "chat",
+                    resolved_provider,
+                    lambda: agent_factory(resolved_settings, resolved_provider, ChatResponse),
+                )
+            except Exception as exc:
+                import logging
+                logging.getLogger("mirdo.startup").warning("Agent prewarm skipped: %s", exc)
         try:
             yield
         finally:

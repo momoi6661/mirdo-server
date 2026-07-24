@@ -483,6 +483,9 @@ def _runtime_model_settings(
         model_settings["temperature"] = temperature
     if settings.chat_max_tokens:
         model_settings["max_tokens"] = settings.chat_max_tokens
+    effort = str(getattr(settings, "chat_reasoning_effort", "")).strip().lower()
+    if effort in {"low", "medium", "high", "max"}:
+        model_settings["reasoning_effort"] = effort
     return model_settings
 
 
