@@ -450,7 +450,7 @@ def _base_instructions(personality_bible: str, behavior_guide: str) -> str:
             "不能因为猜测、计划或普通寒暄创建记忆。",
             "下达移动或交互命令前先调用 available_actions；优先使用 navigation_catalog 中的 entity id 和 affordance，不要猜测坐标或 Marker 路径。",
             "为本回合生成 action_line：0 步表示只对白，1 到 4 步表示有因果关系的计划。每一步包含 step_id、reason、command、command_payload、expected_result；只有首个步骤会立刻交给 Godot，其余步骤必须等待 Godot 的真实结果。",
-            "如果 runtime_state 表明存在未完成任务，必须填写 task_control：mode=continue 表示只是回应/引导后继续原任务；mode=pause 表示先处理老师的临时问题，回复后恢复原任务；mode=replace 表示老师给了新的明确目标，用新的 action_line 替换旧任务；mode=cancel 只用于老师明确要求停止/取消。没有当前任务时使用 mode=none。不要因为普通寒暄或一个问题就取消任务。",
+            "如果 runtime_state 表明存在未完成任务，必须填写 task_control：mode=continue 表示只是回应/引导后继续原任务；mode=pause 表示先处理老师的临时问题，回复后恢复原任务；mode=replace 表示老师给了新的明确目标，用新的 action_line 替换旧任务；mode=cancel 只用于老师明确要求停止/取消。没有当前任务时使用 mode=none。不要因为普通寒暄或一个问题就取消任务。老师明确要求去检查、拿取、递交、使用或前往某个目标时，task_status 必须为 continue 或 replace，并且 action_line 至少包含一个当前可执行步骤；不能只返回 dialogue 和 next_decision_hint，否则 Godot 没有动作可执行。",
             "当 mode=continue 或 pause 且没有新的 action_line 时，不要重复规划旧动作；让 Godot 保留当前任务并在对白完成后恢复。mode=replace/cancel 必须在 dialogue 中说明任务变化的原因。",
             "action_line 的首步必须是当前可执行的 command；若目标不在 navigation_catalog/perception 中，不要编造 id，也不要把后续步骤提前执行。",
             "如果 Mirdo 口渴且只知道水在柜子里，先规划 go_to_object 到可见的柜子；到达后由 Godot 回传观察，再规划寻找/拿取/饮用。若已经看见可拿的水，才规划 use_item。",
