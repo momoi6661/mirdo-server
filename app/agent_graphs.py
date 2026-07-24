@@ -305,6 +305,8 @@ async def plan_behavior(
             state.request.player_text,
             message_history=_agent_message_history(history_turns),
             instructions=runtime_instructions,
+            # 普通聊天关闭思考；动作、工具回执和未完成任务保留思考能力。
+            model_settings=_request_model_settings(state.request, state.resolved_provider, deps.settings),
             usage_limits=UsageLimits(request_limit=4),
             deps=AgentContext(
                 state.request,
@@ -538,6 +540,23 @@ def _usage_snapshot(result: Any) -> dict[str, Any]:
         if isinstance(value, (int, float, str, bool)) or value is None:
             normalized[str(key)] = value
     return normalized
+
+
+def _request_model_settings(request: Any, resolved: Any, settings: Any) -> dict[str, Any]:
+    """按请求类型选择推理强度；普通聊天不为一句对白支付深度思考成本。"""
+    from .mirdo_agent import _runtime_model_settings
+
+    context = getattr(request, "context", {})
+    context = context if isinstance(context, dict) else {}
+    source = str(context.get("request_source", "player")).strip().lower()
+    needs_thinking = source in {"godot_tool", "godot_tool_result", "autonomous", "autonomous_task"}
+    if context.get("task_chain") or context.get("verified_task"):
+        needs_thinking = True
+    return _runtime_model_settings(
+        settings,
+        resolved=resolved,
+        thinking=needs_thinking,
+    )
 
 
 def _is_godot_tool_result_request(request: Any) -> bool:

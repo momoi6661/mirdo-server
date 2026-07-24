@@ -472,6 +472,8 @@ def _runtime_model_settings(
     settings: Settings,
     *,
     temperature: float | None = None,
+    resolved: ResolvedProvider | None = None,
+    thinking: bool | None = None,
 ) -> dict[str, Any]:
     """生成跨服务商的 PydanticAI 模型参数。
 
@@ -486,6 +488,10 @@ def _runtime_model_settings(
     effort = str(getattr(settings, "chat_reasoning_effort", "")).strip().lower()
     if effort in {"low", "medium", "high", "max"}:
         model_settings["reasoning_effort"] = effort
+    # 供应商能力适配：只有明确支持 thinking 开关的 OpenAI-compatible
+    # 服务商才发送 extra_body，其他服务商继续只收到通用参数。
+    if resolved is not None and thinking is not None and "deepseek.com" in resolved.base_url.lower():
+        model_settings["extra_body"] = {"thinking": {"type": "enabled" if thinking else "disabled"}}
     return model_settings
 
 
