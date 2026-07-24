@@ -315,12 +315,17 @@ async def plan_behavior(
                 pending_story_events=state.story_events,
             ),
         )
+        usage = _usage_snapshot(result)
         _trace(
             deps,
             "model_timing",
             session_id=state.request.session_id,
             agent_acquire_ms=agent_acquire_ms,
             agent_run_ms=int((perf_counter() - agent_run_started) * 1000),
+            input_chars=len(state.request.player_text) + len(runtime_instructions),
+            history_chars=sum(len(str(turn.content)) for turn in history_turns),
+            output_chars=len(str(getattr(result, "output", ""))),
+            **usage,
         )
     except Exception as exc:
         # 这里必须把上游 body 打到服务终端：/chat 会降级为本地 fallback，
@@ -509,6 +514,30 @@ def _trace(deps: ChatGraphDeps, event: str, **fields: Any) -> None:
     if not bool(getattr(deps.settings, "chat_trace_enabled", True)):
         return
     _CHAT_LOGGER.info("[ChatTrace] %s %s", event, json.dumps(fields, ensure_ascii=False, default=str))
+
+
+def _usage_snapshot(result: Any) -> dict[str, Any]:
+    """提取 PydanticAI/服务商返回的 token 用量；不同版本缺字段时保持兼容。"""
+    try:
+        usage_value = result.usage() if callable(getattr(result, "usage", None)) else getattr(result, "usage", None)
+    except Exception:
+        usage_value = None
+    if usage_value is None:
+        return {"usage_available": False}
+    if hasattr(usage_value, "model_dump"):
+        raw = usage_value.model_dump(mode="json")
+    elif hasattr(usage_value, "__dict__"):
+        raw = dict(vars(usage_value))
+    elif isinstance(usage_value, dict):
+        raw = usage_value
+    else:
+        return {"usage_available": False}
+    # 保留常见字段，同时把 provider 额外的 cached/reasoning 字段也记录下来。
+    normalized: dict[str, Any] = {"usage_available": True}
+    for key, value in raw.items():
+        if isinstance(value, (int, float, str, bool)) or value is None:
+            normalized[str(key)] = value
+    return normalized
 
 
 def _is_godot_tool_result_request(request: Any) -> bool:
