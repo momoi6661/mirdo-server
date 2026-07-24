@@ -48,16 +48,21 @@ class MirdoContextEngine:
         memories = self._format_memory_facts((memory_facts or [])[: plan.max_memory_hits])
         knowledge = self._format_knowledge((knowledge_hits or [])[: plan.max_knowledge_hits])
         stories = self._format_story_events((story_events or [])[: plan.max_story_hits])
-        context = "\n\n".join(
-            [
-                f"<runtime_state>\n{runtime}\n</runtime_state>",
-                f"<long_term_memory>\n{memories}\n</long_term_memory>",
-                f"<shared_story_events>\n{stories}\n</shared_story_events>",
-                f"<session_summary>\n{session_summary or '（无）'}\n</session_summary>",
-                f"<knowledge_candidates>\n{knowledge}\n</knowledge_candidates>",
-            ]
-        )
-        return context
+        # 空的 XML 区块也会占用输入 token；只发送本回合真正需要的资料。
+        # 这不会改变人格固定前缀，只压缩动态后缀，利于上游 Prompt Cache 命中。
+        sections = [f"<runtime_state>\n{runtime}\n</runtime_state>"]
+        if memories:
+            sections.append(f"<long_term_memory>\n{memories}\n</long_term_memory>")
+        if stories:
+            sections.append(f"<shared_story_events>\n{stories}\n</shared_story_events>")
+        if session_summary.strip():
+            sections.append(f"<session_summary>\n{session_summary.strip()[:2400]}\n</session_summary>")
+        if knowledge:
+            sections.append(f"<knowledge_candidates>\n{knowledge}\n</knowledge_candidates>")
+        context = "\n\n".join(sections)
+        # 防止异常感知或故事文档把一次普通请求膨胀成超长 prompt。
+        max_chars = 9000 if plan.include_world_state else 4200
+        return context[:max_chars]
 
     def plan(self, request: ChatRequest) -> ContextPlan:
         """根据请求来源生成计划；不调用模型，避免增加一次模型延迟。"""
